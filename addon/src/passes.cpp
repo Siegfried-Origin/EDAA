@@ -56,6 +56,7 @@ namespace edaa
 			float jitter[4]; // UV x/y, unjitter flag
 			float blend[4]; // history weight, weight at high motion, reset, clip gamma
 			float flicker[4]; // anti-flicker on, minimum history weight, static clip gamma, soft off-screen
+			float hdr[4]; // HDR compression scale
 		};
 
 		struct target
@@ -509,6 +510,7 @@ namespace edaa
 			tc.flicker[1] = in.config.taa_history_weight_min;
 			tc.flicker[2] = in.config.taa_clip_gamma_static;
 			tc.flicker[3] = in.config.taa_soft_offscreen ? 1.0f : 0.0f;
+			tc.hdr[0] = in.config.taa_hdr_scale;
 			if (!upload(ctx, gpu.taa_cb.Get(), tc))
 				return "cannot update constants";
 
@@ -579,7 +581,8 @@ namespace edaa
 			set_viewport(ctx, static_cast<float>(desc.Width), static_cast<float>(desc.Height));
 			ID3D11Buffer *const cb[] = { gpu.motion_cb.Get(), gpu.object_cb.Get() };
 			ctx->PSSetConstantBuffers(0, 2, cb);
-			bind_srvs(ctx, { gpu.depth.srv.Get(), gpu.motion.srv.Get(), gpu.mask.srv.Get(), gpu.history[gpu.history_index].srv.Get() });
+			bind_srvs(ctx, { gpu.depth.srv.Get(), gpu.motion.srv.Get(), gpu.mask.srv.Get(), gpu.history[gpu.history_index].srv.Get(),
+				nullptr, gpu.history[1 - gpu.history_index].srv.Get() });
 			ctx->PSSetShader(gpu.ps_debug.Get(), nullptr, 0);
 			ctx->Draw(3, 0);
 		}

@@ -19,6 +19,7 @@ namespace edaa
 		depth = 3, // linear depth, to check the depth buffer is found
 		rejection = 4, // where the TAA clipped the reprojected history (red)
 		objects = 5, // moving instances and how far camera reprojection misses them
+		temporal_change = 6, // how much the TAA output changed since the last frame (flicker finder, camera still)
 	};
 
 	struct settings
@@ -32,19 +33,21 @@ namespace edaa
 		float taa_history_weight_motion = 0.9f; // history share at high motion (lower = less ghosting, more aliasing)
 		float taa_clip_gamma = 1.25f; // variance clip box size in standard deviations
 		bool taa_unjitter = false; // sample the current frame at the unjittered position (softer)
-		bool taa_reconstruction = true; // Gaussian 3x3 reconstruction of the current sample (less flicker)
+		bool taa_reconstruction = false; // Gaussian 3x3 reconstruction of the current sample (softer; no visible flicker gain in game)
 		bool taa_anti_flicker = true; // luminance-difference history weighting
 		float taa_history_weight_min = 0.95f; // history weight when current and history disagree
 		float taa_clip_gamma_static = 5.0f; // clip box for still pixels (larger = less flicker)
 		bool map_detect_no_shadows = true; // also treat frames without sun shadow pass as a map
 		bool taa_before_hud = true; // resolve before the HUD pass: HUD/holograms not anti-aliased, no ghosting
 		bool taa_soft_offscreen = true; // reuse the edge of the history for pixels entering the screen
+		float taa_hdr_scale = 50.0f; // scene values are multiplied by this before the HDR compression c/(1+c) (50: chosen in a station)
 
 		bool motion_enabled = true;
 		int mask_source = 0; // 0: game stencil bit (player's vehicle), 1: distance
 		int mask_stencil_bits = 0x80; // stencil bit(s) the game sets on the player's vehicle
 		float mask_distance = 4.0f; // metres: closer pixels are treated as attached to the vehicle (distance mode)
 		bool mask_auto_off_on_foot = true; // no vehicle on foot: the ground near the feet must move
+		bool jitter_overlay_draws = true; // also jitter decals, light volumes and glows (else they z-fight and flicker)
 		bool object_analysis = false; // developer: read t33 and match instances across frames
 		int debug = 0; // debug_view
 		float debug_motion_pixels = 16.0f; // motion that saturates the debug colours

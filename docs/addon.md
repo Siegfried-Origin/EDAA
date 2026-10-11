@@ -24,7 +24,13 @@ Per frame, in the order the game draws:
    viewport origin (8 phases, 1 px), only for scene geometry drawn before
    the resolve: draws into the scene depth with a reverse-Z depth test
    (`GREATER`, `GREATER_EQUAL`, `EQUAL`), full-size viewport, not fullscreen
-   triangles. Matrix-agnostic: works for every shader family.
+   triangles. Also, unless "Jitter decals, light volumes and glows" is off
+   (developer), every other draw into the scene depth or HDR target before
+   the resolve except single 4-vertex quads (fog composite): decal and light
+   volumes drawn as boxes with `LESS_EQUAL` (back faces), glows and sky
+   meshes without depth test. Left unjittered over jittered surfaces they
+   z-fight: station signs (the text area) and lamps flickered. Matrix-agnostic:
+   works for every shader family.
 4. **Resolve point** (`frame_tracking.cpp`): right before the cockpit HUD
    pass, i.e. the first draw into the HDR scene after the exposure
    downsample (`R11G11B10` at 1/4 render size), or the first draw of the HUD
@@ -95,8 +101,10 @@ Developer builds only:
 
 * `Ctrl+Shift+J`: jitter alone. TAA off + jitter on = compare mode.
 * `Ctrl+Shift+M`: debug view: off, motion vectors, vehicle mask, depth,
-  history rejection, moving objects. Magenta = no data this frame ("Status"
-  says why).
+  history rejection, moving objects, temporal change (red where the TAA
+  output changed since the last frame: with the camera still, it shows what
+  flickers in the TAA output; flicker on screen without red comes from after
+  the resolve). Magenta = no data this frame ("Status" says why).
 * `Ctrl+Shift+C`: auto capture.
 
 ## Settings (overlay)
@@ -112,8 +120,9 @@ defaults" restores the values below. The debug view always starts off.
 | History weight in motion | 0.9 | cap for fast motion (lower: less ghosting) |
 | Clip box in motion / when still | 1.25 / 5.0 | variance clip in standard deviations (lower: less ghosting, more flicker) |
 | Anti-flicker, min history weight | on, 0.95 | history weight when current and history disagree (at 0.95, above the history weight, it has no effect: chosen in game as the least flickering) |
+| HDR compression scale | 50 | scene values (before the game's exposure) are multiplied by it before the c/(1+c) compression used for filtering and blending; higher = bright thin edges make their dark neighbours ripple less with the jitter. At 1 high-contrast edges in stations flickered; 50 fixes them; near 1000 highlights look wrong |
 | Soft screen edges | on | pixels entering the screen reuse the edge of the history |
-| Reconstruction filter | on | current sample = Gaussian 3x3 around the unjittered pixel centre (thin highlights fade instead of flickering) |
+| Reconstruction filter | off | current sample = Gaussian 3x3 around the unjittered pixel centre; meant to make thin highlights fade instead of flicker, but in game it softens the image without a visible gain |
 | Unjitter current sample | off | softer image (when the filter is off) |
 | Resolve before the HUD pass | on | HUD/holograms out of the TAA |
 | Vehicle mask | game stencil | or distance to camera (with auto-off on foot) |
@@ -128,10 +137,13 @@ defaults" restores the values below. The debug view always starts off.
   statistics) to `<capture folder>/<date_time>/`,
   and traces that frame into `ReShade.log`. Keep doing the same thing
   (still, or turning steadily) during the capture.
-* **Frame trace** ("Dump/trace next frame"): one frame of render target
-  bindings and draws in `ReShade.log`, with pixel shader hash, depth test /
-  write, blending, jitter and the position of the TAA resolve. It is how the
-  HUD pass was located.
+* **Frame trace** ("Dump/trace next frame"): one frame of the render target
+  bindings and draws that touch the scene depth or HDR target (up to 20000
+  lines) in `ReShade.log`, with pixel shader hash, depth test and compare
+  function (`zfunc`: -1 off, 1 less, 2 equal, 3 less_equal, 4 greater,
+  5 not_equal, 6 greater_equal, 7 always), depth write, blending, full
+  viewport, jitter and the position of the TAA resolve. It is how the HUD
+  pass and the unjittered decals were located.
 * **Moving objects** section: reads the instance buffer `t33` each frame,
   matches its records with the previous frame and shows how many are still,
   spinning, moving, part of the player's vehicle or unmatched, the camera
@@ -155,8 +167,9 @@ defaults" restores the values below. The debug view always starts off.
   Plan: [motion-vectors.md](motion-vectors.md) section 3.
 * Thin very bright highlights can still flicker slightly.
 * Map detection takes effect one frame after the map appears (one frame
-  with jitter when it opens). The galaxy map is only covered by the
-  missing-sun-shadow rule (not captured yet).
+  with jitter when it opens). The galaxy map is not flagged as a map but
+  is not affected either: it has no G-buffer scene with a main camera, so
+  the TAA does not run there (checked in game, no ghosting).
 * Shader hashes are those of game build `2026.09.03.332841`; a game update
   may change them (the structural markers keep working, the log says which
   shaders were found).

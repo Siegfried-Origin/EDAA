@@ -10,6 +10,7 @@ cbuffer taa_constants : register(b0)
 	float4 jitter; // xy: current jitter in UV, z: unjitter current sample (0/1), w: reconstruction filter (0/1)
 	float4 blend; // x: history weight, y: history weight at high motion, z: reset (1 = no history), w: variance clip gamma
 	float4 flicker; // x: anti-flicker on, y: minimum history weight, z: clip gamma for static pixels, w: soft off-screen on
+	float4 hdr; // x: scale applied before the HDR compression (the scene is not exposed yet)
 };
 
 Texture2D<float3> scene_color : register(t0);
@@ -29,8 +30,11 @@ float3 ycocg_to_rgb(float3 c)
 }
 
 // Compress HDR before filtering so bright pixels do not dominate (reversible).
-float3 tonemap(float3 c) { return c / (1 + max(c.r, max(c.g, c.b))); }
-float3 untonemap(float3 c) { return c / max(1e-4, 1 - max(c.r, max(c.g, c.b))); }
+// The scene target holds values before the game's exposure, so they are
+// scaled first: with too small a scale c/(1+c) stays linear and a bright thin
+// edge still makes its dark neighbours ripple with the jitter.
+float3 tonemap(float3 c) { c *= hdr.x; return c / (1 + max(c.r, max(c.g, c.b))); }
+float3 untonemap(float3 c) { return c / max(1e-4, 1 - max(c.r, max(c.g, c.b))) / hdr.x; }
 
 float3 load_current(int2 p)
 {
@@ -166,8 +170,8 @@ float4 ps_taa(float4 pos : SV_Position) : SV_Target
 	const float wc = (1 - history_weight) * (1 - current.x);
 	const float wh = history_weight * (1 - history.x);
 	const float3 result = (current * wc + history * wh) / max(wc + wh, 1e-5);
-	// Clamp before inverting the compression (it diverges at 1).
-	return float4(untonemap(clamp(ycocg_to_rgb(result), 0, 0.995)), rejection);
+	// Clamp before inverting the compression (it diverges at 1): up to 1e5 / scale.
+	return float4(untonemap(clamp(ycocg_to_rgb(result), 0, 0.99999)), rejection);
 }
 
 // Copies the resolved image back into the game's scene target.

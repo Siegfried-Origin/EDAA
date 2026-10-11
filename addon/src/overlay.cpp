@@ -48,6 +48,7 @@ namespace edaa
 			edit(ImGui::Checkbox("Reconstruction filter (less flicker on thin highlights)", &s.config.taa_reconstruction));
 			edit(ImGui::Checkbox("Unjitter current sample (softer, used when the filter is off)", &s.config.taa_unjitter));
 			edit(ImGui::Checkbox("Soft screen edges (reuse edge history)", &s.config.taa_soft_offscreen));
+			edit(ImGui::SliderFloat("HDR compression scale (higher = bright edges flicker less)", &s.config.taa_hdr_scale, 0.01f, 1000.0f, "%.2f", ImGuiSliderFlags_Logarithmic));
 			ImGui::TextUnformatted("Scene");
 			edit(ImGui::Checkbox("Resolve before the HUD pass (HUD sharp, not anti-aliased)", &s.config.taa_before_hud));
 			edit(ImGui::Checkbox("Detect maps also by missing sun shadows", &s.config.map_detect_no_shadows));
@@ -111,6 +112,7 @@ namespace edaa
 			edit(ImGui::Checkbox("Enable sub-pixel jitter", &s.config.jitter_enabled));
 			edit(ImGui::SliderInt("Halton phases", &s.config.jitter_phases, 1, 32));
 			edit(ImGui::SliderFloat("Amplitude (pixels)", &s.config.jitter_scale, 1.0f, 16.0f, "%.1f"));
+			edit(ImGui::Checkbox("Jitter decals, light volumes and glows (off: they z-fight and flicker)", &s.config.jitter_overlay_draws));
 			ImGui::Text("Current offset: %+.3f, %+.3f px", s.jitter_x, s.jitter_y);
 			ImGui::Text("Last frame: %u of %u scene draws jittered", s.last.jittered_draws, s.last.scene_draws);
 			if (s.config.taa_enabled && !s.config.jitter_enabled)
@@ -121,7 +123,7 @@ namespace edaa
 			ImGui::Separator();
 			ImGui::TextUnformatted("Debug views (Ctrl+Shift+M)");
 			edit(ImGui::Checkbox("Generate motion vectors", &s.config.motion_enabled));
-			ImGui::Combo("Debug view", &s.config.debug, "Off\0Motion vectors\0Vehicle mask\0Depth\0History rejection\0Moving objects\0");
+			ImGui::Combo("Debug view", &s.config.debug, "Off\0Motion vectors\0Vehicle mask\0Depth\0History rejection\0Moving objects\0Temporal change (flicker)\0");
 			edit(ImGui::SliderFloat("Colour saturation (px)", &s.config.debug_motion_pixels, 1.0f, 64.0f, "%.0f"));
 
 			ImGui::Separator();

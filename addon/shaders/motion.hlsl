@@ -9,7 +9,7 @@ cbuffer motion_constants : register(b0)
 	float4 camera_delta; // xyz: current camera position - previous (c275)
 	float4 params; // xy: jitter in UV, z: near plane, w: vehicle mask distance (m)
 	float4 render_size; // w, h, 1/w, 1/h
-	float4 debug; // x: mode (1 motion, 2 mask, 3 depth, 4 history rejection, 5 objects), y: pixels for full colour,
+	float4 debug; // x: mode (1 motion, 2 mask, 3 depth, 4 history rejection, 5 objects, 6 temporal change), y: pixels for full colour,
 	              // z: vehicle mask source (0 stencil bits, 1 distance), w: stencil bits of the player's vehicle
 };
 
@@ -25,6 +25,7 @@ Texture2D<float2> motion_tex : register(t1);
 Texture2D<float> mask_tex : register(t2);
 Texture2D<uint2> scene_stencil : register(t4); // .g = stencil
 Texture2D<float4> history_tex : register(t3); // alpha: history rejection of the last TAA pass
+Texture2D<float4> prev_history_tex : register(t5); // TAA output of the frame before
 SamplerState point_sampler : register(s0);
 
 void vs_fullscreen(uint id : SV_VertexID, out float4 pos : SV_Position, out float2 uv : TEXCOORD)
@@ -114,6 +115,18 @@ float4 ps_debug(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 				colour = e.y > 1.5 ? float3(0.1, 0.8, 1) : lerp(float3(1, 0.9, 0.1), float3(1, 0.1, 0.1), saturate(e.x / debug.y));
 		}
 		return float4(colour, 1);
+	}
+	if (debug.x == 6)
+	{
+		// Grey scene; red where the TAA output changed since the last frame
+		// (relative luminance change, full red at 10%). With the camera still,
+		// red pixels are what flickers in the TAA output itself; flicker on
+		// screen without red here comes from after the resolve.
+		const float3 luma = float3(0.2126, 0.7152, 0.0722);
+		const float a = dot(history_tex.Load(int3(px, 0)).rgb, luma);
+		const float b = dot(prev_history_tex.Load(int3(px, 0)).rgb, luma);
+		const float change = abs(a - b) / max(max(a, b), 0.05);
+		return float4(lerp(depth_shade.xxx * 0.5, float3(1, 0.1, 0.1), saturate(change * 10)), 1);
 	}
 	if (debug.x == 4)
 	{

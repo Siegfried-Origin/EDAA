@@ -39,6 +39,14 @@ add_custom_command(
 	COMMENT "Compiling taa.hlsl"
 )
 
+# Build date/time shown in the overlay, refreshed on every build.
+add_custom_target(edaa_build_stamp
+	COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUT}
+	COMMAND ${CMAKE_COMMAND} -DOUT=${SHADER_OUT}/build_stamp.h -P ${CMAKE_SOURCE_DIR}/addon/build_stamp.cmake
+	BYPRODUCTS ${SHADER_OUT}/build_stamp.h
+	COMMENT "Updating build stamp"
+)
+
 add_library(edaa SHARED
 	addon/src/main.cpp
 	addon/src/camera.cpp
@@ -54,6 +62,7 @@ add_library(edaa SHARED
 )
 target_include_directories(edaa SYSTEM PRIVATE ${RESHADE_INCLUDE} ${IMGUI_INCLUDE})
 target_include_directories(edaa PRIVATE ${SHADER_OUT})
+add_dependencies(edaa edaa_build_stamp)
 target_compile_features(edaa PRIVATE cxx_std_20)
 target_compile_definitions(edaa PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 # Developer UI (debug views, capture, diagnostics): -DEDAA_DEVELOPER=ON, always on in Debug.

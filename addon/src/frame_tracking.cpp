@@ -8,7 +8,8 @@
 //    for holograms/particles, cb2 for the sky). Applied only to scene
 //    geometry before the TAA resolve: draws into the scene depth with a
 //    reverse-Z depth test (GREATER/GREATER_EQUAL/EQUAL), full-size viewport,
-//    not fullscreen triangles.
+//    not fullscreen triangles; plus decals, light volumes and glows (other
+//    depth tests, or the HDR target only), which otherwise z-fight.
 //  * TAA resolve point: before the cockpit HUD pass (see check_resolve_point).
 //  * Frame trace for diagnostics (one frame of binds and draws in the log).
 
@@ -44,6 +45,7 @@ namespace edaa
 			// Frame trace (diagnostics)
 			uint64_t ps_hash = 0;
 			bool blend_on = false, depth_write = false;
+			int depth_func = -1; // compare_op of the bound depth state, -1 = depth test off
 			uint32_t trace_lines = 0;
 		};
 
@@ -57,6 +59,7 @@ namespace edaa
 		// For the frame trace: pixel shader hashes, blend and depth-write states.
 		std::unordered_map<uint64_t, uint64_t> pixel_hashes;
 		std::unordered_map<uint64_t, bool> blend_states, depth_writes;
+		std::unordered_map<uint64_t, int> depth_funcs;
 
 		// 3DMigoto hash (FNV-1, seed 0) of the bloom downsample pixel shader that
 		// first reads the HDR scene (docs/reverse-engineering.md section 3).
@@ -144,6 +147,7 @@ namespace edaa
 					const auto &ds = *static_cast<const depth_stencil_desc *>(subobjects[i].data);
 					const std::lock_guard<std::mutex> lock(pipelines_mutex);
 					depth_writes[pipeline.handle] = ds.depth_enable && ds.depth_write_mask;
+					depth_funcs[pipeline.handle] = ds.depth_enable ? static_cast<int>(ds.depth_func) : -1;
 				}
 				const auto &desc = *static_cast<const depth_stencil_desc *>(subobjects[i].data);
 				const bool ok = desc.depth_enable && (desc.depth_func == compare_op::greater ||
@@ -161,6 +165,7 @@ namespace edaa
 			pixel_hashes.erase(pipeline.handle);
 			blend_states.erase(pipeline.handle);
 			depth_writes.erase(pipeline.handle);
+			depth_funcs.erase(pipeline.handle);
 			hud_shaders.erase(pipeline.handle);
 			map_shaders.erase(pipeline.handle);
 		}
@@ -182,6 +187,8 @@ namespace edaa
 				ctx->depth_test_ok = it != depth_states.end() && it->second;
 				const auto w = depth_writes.find(pipeline.handle);
 				ctx->depth_write = w != depth_writes.end() && w->second;
+				const auto f = depth_funcs.find(pipeline.handle);
+				ctx->depth_func = f != depth_funcs.end() ? f->second : -1;
 			}
 			if (blend)
 			{
@@ -236,13 +243,29 @@ namespace edaa
 				ctx->trace_lines = 0;
 				return false;
 			}
-			return ctx->trace_lines++ < 3000;
+			return ctx->trace_lines < 20000;
+		}
+
+		// Only bindings and draws that touch the scene depth or HDR target are
+		// traced (shadow passes alone would fill the log).
+		bool touches_scene(device *dev, uint32_t count, const resource_view *rtvs, resource_view dsv)
+		{
+			addon_state &s = state();
+			uint64_t depth = 0, rt0 = 0;
+			if (dsv.handle != 0)
+				depth = dev->get_resource_from_view(dsv).handle;
+			for (uint32_t i = 0; i < count && rt0 == 0; ++i)
+				if (rtvs[i].handle != 0)
+					rt0 = dev->get_resource_from_view(rtvs[i]).handle;
+			const std::lock_guard<std::recursive_mutex> lock(s.mutex);
+			return (depth != 0 && depth == s.scene_depth) || (rt0 != 0 && rt0 == s.scene_color);
 		}
 
 		void trace_bind(context_state *ctx, device *dev, uint32_t count, const resource_view *rtvs, resource_view dsv)
 		{
-			if (!tracing(ctx))
+			if (!tracing(ctx) || !touches_scene(dev, count, rtvs, dsv))
 				return;
+			ctx->trace_lines++;
 			char msg[512];
 			int n = snprintf(msg, sizeof(msg), "EDAA trace: bind %u RT", count);
 			addon_state &s = state();
@@ -267,17 +290,29 @@ namespace edaa
 			if (!tracing(ctx))
 				return;
 			addon_state &s = state();
-			bool resolved, jitter;
 			{
 				const std::lock_guard<std::recursive_mutex> lock(s.mutex);
+				if (!ctx->scene_targets && (ctx->rt0 == 0 || ctx->rt0 != s.scene_color))
+					return;
+			}
+			ctx->trace_lines++;
+			bool resolved, jitter;
+			uint32_t render_w, render_h;
+			{
+				const std::lock_guard<std::recursive_mutex> lock(s.mutex);
+				render_w = s.render_w;
+				render_h = s.render_h;
 				resolved = s.resolved_this_frame;
 				jitter = s.config.jitter_enabled;
 			}
-			char msg[256];
-			snprintf(msg, sizeof(msg), "EDAA trace: %s %u x%u ps=%016llx ztest=%d zwrite=%d blend=%d scene=%d jittered=%d %s",
-				kind, count, instances, static_cast<unsigned long long>(ctx->ps_hash), ctx->depth_test_ok ? 1 : 0,
-				ctx->depth_write ? 1 : 0, ctx->blend_on ? 1 : 0, ctx->scene_targets ? 1 : 0,
-				(ctx->jitter_applied && jitter) ? 1 : 0, resolved ? "(after resolve)" : "");
+			// zfunc: compare_op (-1 off, 1 less, 2 equal, 3 less_equal, 4 greater, 6 greater_equal, 7 always);
+			// vpfull: viewport is the full render size.
+			const bool vp_full = ctx->game_viewport.width == static_cast<float>(render_w) && ctx->game_viewport.height == static_cast<float>(render_h);
+			char msg[320];
+			snprintf(msg, sizeof(msg), "EDAA trace: %s %u x%u ps=%016llx ztest=%d zfunc=%d zwrite=%d blend=%d scene=%d hdr=%d vpfull=%d jittered=%d %s",
+				kind, count, instances, static_cast<unsigned long long>(ctx->ps_hash), ctx->depth_test_ok ? 1 : 0, ctx->depth_func,
+				ctx->depth_write ? 1 : 0, ctx->blend_on ? 1 : 0, ctx->scene_targets ? 1 : 0, ctx->rt0 == s.scene_color ? 1 : 0,
+				vp_full ? 1 : 0, (ctx->jitter_applied && jitter) ? 1 : 0, resolved ? "(after resolve)" : "");
 			reshade::log::message(reshade::log::level::info, msg);
 		}
 
@@ -347,7 +382,7 @@ namespace edaa
 		}
 
 		// Binds the jittered or the original viewport before a draw, as needed.
-		void update_viewport(command_list *cmd_list, bool fullscreen_triangle)
+		void update_viewport(command_list *cmd_list, bool fullscreen_triangle, bool single_quad = false)
 		{
 			auto *ctx = cmd_list->get_private_data<context_state>();
 			if (ctx == nullptr || !ctx->has_viewport)
@@ -361,8 +396,17 @@ namespace edaa
 				const bool scene_draw = ctx->scene_targets && ctx->depth_test_ok && !fullscreen_triangle &&
 					ctx->game_viewport.width == static_cast<float>(s.render_w) &&
 					ctx->game_viewport.height == static_cast<float>(s.render_h);
+				// Also jitter the other draws into the scene before the resolve: decal
+				// and light volumes (LESS_EQUAL test on back faces), glows and sky
+				// meshes without depth test. Left unjittered over jittered surfaces,
+				// they z-fight and flicker (station signs, lamps).
+				// Not single 4-vertex quads: the fog composite is one, drawn fullscreen.
+				const bool overlay_draw = s.config.jitter_overlay_draws && !fullscreen_triangle && !single_quad &&
+					(ctx->scene_targets || (ctx->rt0 != 0 && ctx->rt0 == s.scene_color)) &&
+					ctx->game_viewport.width == static_cast<float>(s.render_w) &&
+					ctx->game_viewport.height == static_cast<float>(s.render_h);
 				// Nothing drawn after the TAA resolve is accumulated: do not jitter it.
-				want = scene_draw && s.config.jitter_enabled && !s.resolved_this_frame && !s.map_mode;
+				want = (scene_draw || overlay_draw) && s.config.jitter_enabled && !s.resolved_this_frame && !s.map_mode;
 				jx = s.jitter_x;
 				jy = s.jitter_y;
 				if (scene_draw)
@@ -432,7 +476,7 @@ namespace edaa
 		{
 			const bool fullscreen = vertex_count == 3 && instance_count == 1;
 			check_resolve_point(cmd_list);
-			update_viewport(cmd_list, fullscreen);
+			update_viewport(cmd_list, fullscreen, vertex_count == 4 && instance_count == 1);
 			if (auto *ctx = cmd_list->get_private_data<context_state>())
 				trace_draw(ctx, "draw", vertex_count, instance_count);
 			return false;

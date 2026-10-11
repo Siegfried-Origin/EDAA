@@ -33,6 +33,7 @@ namespace edaa
 			EDAA_FIELD(taa_anti_flicker, boolean),
 			EDAA_FIELD(taa_history_weight_min, real),
 			EDAA_FIELD(taa_soft_offscreen, boolean),
+			EDAA_FIELD(taa_hdr_scale, real),
 			EDAA_FIELD(taa_before_hud, boolean),
 			EDAA_FIELD(map_detect_no_shadows, boolean),
 			EDAA_FIELD(motion_enabled, boolean),
@@ -42,6 +43,7 @@ namespace edaa
 			EDAA_FIELD(mask_auto_off_on_foot, boolean),
 			EDAA_FIELD(debug_motion_pixels, real),
 			EDAA_FIELD(object_analysis, boolean),
+			EDAA_FIELD(jitter_overlay_draws, boolean),
 		};
 #undef EDAA_FIELD
 

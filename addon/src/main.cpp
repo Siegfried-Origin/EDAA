@@ -5,13 +5,15 @@
 
 #include <Windows.h>
 
+#include "build_stamp.h" // generated at every build
+
 extern "C" __declspec(dllexport) const char *NAME = "EDAA";
 extern "C" __declspec(dllexport) const char *DESCRIPTION =
 	"Temporal anti-aliasing groundwork for Elite Dangerous: camera tracking, sub-pixel jitter, motion vectors.";
 
 namespace edaa
 {
-	const char *const build_stamp = __DATE__ " " __TIME__;
+	const char *const build_stamp = EDAA_BUILD_STAMP;
 
 	addon_state &state()
 	{
@@ -52,7 +54,7 @@ namespace edaa
 			if (runtime->is_key_pressed('M'))
 			{
 				const std::lock_guard<std::recursive_mutex> lock(s.mutex);
-				s.config.debug = (s.config.debug + 1) % 6;
+				s.config.debug = (s.config.debug + 1) % 7;
 			}
 #endif
 		}

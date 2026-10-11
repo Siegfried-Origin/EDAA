@@ -37,6 +37,7 @@ namespace edaa
 			{ "6_depth", true, true, debug_view::depth, 5 },
 			{ "7_history_rejection", true, true, debug_view::rejection, 5 },
 			{ "8_moving_objects", true, true, debug_view::objects, 5 },
+			{ "9_temporal_change", true, true, debug_view::temporal_change, 5 },
 		};
 		constexpr int step_count = sizeof(steps) / sizeof(steps[0]);
 
