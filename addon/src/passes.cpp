@@ -17,6 +17,7 @@
 #include "events.hpp"
 #include "state.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -41,6 +42,12 @@ namespace edaa
 			float params[4]; // jitter UV x/y, near, mask distance
 			float render_size[4];
 			float debug[4]; // mode, pixels for full colour
+		};
+
+		struct alignas(16) object_constants
+		{
+			float info[4]; // marker count, target width, height
+			float markers[addon_state::max_markers * 2][4];
 		};
 
 		struct alignas(16) taa_constants
@@ -71,7 +78,7 @@ namespace edaa
 			ID3D11Device *device = nullptr; // not owned
 			ComPtr<ID3D11VertexShader> vs;
 			ComPtr<ID3D11PixelShader> ps_motion, ps_debug, ps_taa, ps_copy;
-			ComPtr<ID3D11Buffer> motion_cb, taa_cb;
+			ComPtr<ID3D11Buffer> motion_cb, taa_cb, object_cb;
 			ComPtr<ID3D11SamplerState> linear_clamp;
 
 			uint32_t width = 0, height = 0;
@@ -154,7 +161,8 @@ namespace edaa
 				SUCCEEDED(device->CreatePixelShader(g_ps_copy, sizeof(g_ps_copy), nullptr, &gpu.ps_copy)) &&
 				SUCCEEDED(device->CreateSamplerState(&sampler, &gpu.linear_clamp)) &&
 				create_buffer(sizeof(motion_constants), gpu.motion_cb) &&
-				create_buffer(sizeof(taa_constants), gpu.taa_cb);
+				create_buffer(sizeof(taa_constants), gpu.taa_cb) &&
+				create_buffer(sizeof(object_constants), gpu.object_cb);
 		}
 
 		bool create_target(DXGI_FORMAT format, target &t)
@@ -290,7 +298,7 @@ namespace edaa
 			ID3D11PixelShader *ps = nullptr;
 			ID3D11ShaderResourceView *ps_srvs[srv_count] = {};
 			ID3D11SamplerState *ps_sampler = nullptr;
-			ID3D11Buffer *ps_cb = nullptr;
+			ID3D11Buffer *ps_cbs[2] = {};
 
 			explicit state_backup(ID3D11DeviceContext *context) : ctx(context)
 			{
@@ -308,7 +316,7 @@ namespace edaa
 				ctx->PSGetShader(&ps, nullptr, nullptr);
 				ctx->PSGetShaderResources(0, srv_count, ps_srvs);
 				ctx->PSGetSamplers(0, 1, &ps_sampler);
-				ctx->PSGetConstantBuffers(0, 1, &ps_cb);
+				ctx->PSGetConstantBuffers(0, 2, ps_cbs);
 			}
 
 			~state_backup()
@@ -329,11 +337,12 @@ namespace edaa
 				ctx->PSSetShader(ps, nullptr, 0);
 				ctx->PSSetShaderResources(0, srv_count, ps_srvs);
 				ctx->PSSetSamplers(0, 1, &ps_sampler);
-				ctx->PSSetConstantBuffers(0, 1, &ps_cb);
+				ctx->PSSetConstantBuffers(0, 2, ps_cbs);
 
 				for (auto *p : rtvs) if (p) p->Release();
 				for (auto *p : ps_srvs) if (p) p->Release();
-				IUnknown *others[] = { dsv, rs, blend, ds, layout, vs, hs, ds_shader, gs, ps, ps_sampler, ps_cb };
+				for (auto *p : ps_cbs) if (p) p->Release();
+				IUnknown *others[] = { dsv, rs, blend, ds, layout, vs, hs, ds_shader, gs, ps, ps_sampler };
 				for (auto *p : others) if (p) p->Release();
 			}
 		};
@@ -528,7 +537,8 @@ namespace edaa
 		}
 
 		// Debug view over the back buffer at Present (magenta: no data this frame).
-		void draw_debug(ID3D11Device *device, ID3D11DeviceContext *ctx, ID3D11Resource *back_buffer, bool have_data, const settings &config)
+		void draw_debug(ID3D11Device *device, ID3D11DeviceContext *ctx, ID3D11Resource *back_buffer, bool have_data, const settings &config,
+			const object_marker *markers, int marker_count)
 		{
 			ComPtr<ID3D11RenderTargetView> rtv;
 			ComPtr<ID3D11Texture2D> tex;
@@ -543,16 +553,32 @@ namespace edaa
 				return;
 			}
 			// The motion constants of this frame are still in motion_cb; only the mode may differ.
-			(void)config;
 			D3D11_TEXTURE2D_DESC desc;
 			tex->GetDesc(&desc);
+			if (config.debug == static_cast<int>(debug_view::objects))
+			{
+				object_constants oc = {};
+				oc.info[0] = static_cast<float>(marker_count);
+				oc.info[1] = static_cast<float>(desc.Width);
+				oc.info[2] = static_cast<float>(desc.Height);
+				for (int i = 0; i < marker_count; ++i)
+				{
+					const object_marker &m = markers[i];
+					const float a[4] = { m.x, m.y, m.offset_x, m.offset_y };
+					const float b[4] = { m.error_px, static_cast<float>(m.kind), 0, 0 };
+					std::memcpy(oc.markers[2 * i], a, sizeof(a));
+					std::memcpy(oc.markers[2 * i + 1], b, sizeof(b));
+				}
+				if (!upload(ctx, gpu.object_cb.Get(), oc))
+					return;
+			}
 			const state_backup backup(ctx);
 			bind_fullscreen(ctx);
 			ID3D11RenderTargetView *const targets[] = { rtv.Get() };
 			ctx->OMSetRenderTargets(1, targets, nullptr);
 			set_viewport(ctx, static_cast<float>(desc.Width), static_cast<float>(desc.Height));
-			ID3D11Buffer *const cb[] = { gpu.motion_cb.Get() };
-			ctx->PSSetConstantBuffers(0, 1, cb);
+			ID3D11Buffer *const cb[] = { gpu.motion_cb.Get(), gpu.object_cb.Get() };
+			ctx->PSSetConstantBuffers(0, 2, cb);
 			bind_srvs(ctx, { gpu.depth.srv.Get(), gpu.motion.srv.Get(), gpu.mask.srv.Get(), gpu.history[gpu.history_index].srv.Get() });
 			ctx->PSSetShader(gpu.ps_debug.Get(), nullptr, 0);
 			ctx->Draw(3, 0);
@@ -566,6 +592,8 @@ namespace edaa
 
 			bool resolved;
 			settings config;
+			object_marker markers[addon_state::max_markers];
+			int marker_count;
 			{
 				const std::lock_guard<std::recursive_mutex> lock(s.mutex);
 				s.back_buffer_w = bb_desc.texture.width;
@@ -576,6 +604,9 @@ namespace edaa
 				s.resolved_this_frame = false;
 				config = s.config;
 				finish_camera_frame(s);
+				analyse_objects(s);
+				marker_count = s.marker_count;
+				std::copy(s.markers, s.markers + marker_count, markers);
 				advance_frame(s);
 			}
 
@@ -583,7 +614,7 @@ namespace edaa
 			{
 				auto *const device = reinterpret_cast<ID3D11Device *>(queue->get_device()->get_native());
 				auto *const ctx = reinterpret_cast<ID3D11DeviceContext *>(queue->get_immediate_command_list()->get_native());
-				try { draw_debug(device, ctx, reinterpret_cast<ID3D11Resource *>(back_buffer.handle), resolved, config); }
+				try { draw_debug(device, ctx, reinterpret_cast<ID3D11Resource *>(back_buffer.handle), resolved, config, markers, marker_count); }
 				catch (...) {}
 			}
 			capture_on_present(queue, swapchain);

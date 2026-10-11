@@ -45,6 +45,7 @@ add_library(edaa SHARED
 	addon/src/camera_tracker.cpp
 	addon/src/frame_tracking.cpp
 	addon/src/passes.cpp
+	addon/src/object_motion.cpp
 	addon/src/overlay.cpp
 	addon/src/capture.cpp
 	addon/src/settings.cpp

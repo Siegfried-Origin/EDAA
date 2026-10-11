@@ -41,6 +41,7 @@ namespace edaa
 			EDAA_FIELD(mask_distance, real),
 			EDAA_FIELD(mask_auto_off_on_foot, boolean),
 			EDAA_FIELD(debug_motion_pixels, real),
+			EDAA_FIELD(object_analysis, boolean),
 		};
 #undef EDAA_FIELD
 

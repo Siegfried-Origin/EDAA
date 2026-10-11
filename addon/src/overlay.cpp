@@ -84,6 +84,22 @@ namespace edaa
 				s.last.camera_updates[static_cast<int>(view_kind::orthographic)]);
 		}
 
+		void draw_objects(addon_state &s, change_tracker &edit)
+		{
+			edit(ImGui::Checkbox("Analyse instance motion (also on with the \"Moving objects\" debug view)", &s.config.object_analysis));
+			if (!s.config.object_analysis && s.config.debug != static_cast<int>(debug_view::objects))
+				return;
+			const object_stats &o = s.objects;
+			ImGui::Text("Instance buffer Map/Unmap last frame: %u (read %.2f ms, match %.2f ms)", o.buffer_maps, o.read_ms, o.match_ms);
+			ImGui::Text("Records %u: still %u, spinning %u, moving %u, player's vehicle %u, unmatched %u",
+				o.records, o.still, o.spinning, o.moving, o.vehicle, o.unmatched);
+			ImGui::Text("Moving objects on screen: %u, camera reprojection error max %.1f px, mean %.1f px",
+				o.visible_moving, o.max_error_px, o.mean_error_px);
+			ImGui::TextUnformatted("Debug view: rings = moving objects (yellow to red with the error), cyan = vehicle,");
+			ImGui::TextUnformatted("green dots = some spinning objects (asteroids: they rotate in place, no ring);");
+			ImGui::TextUnformatted("the line points to where the TAA history ghost of the object would be.");
+		}
+
 		void draw_developer(addon_state &s, change_tracker &edit)
 		{
 			ImGui::Text("Resolve point: %s", s.resolve_point);
@@ -105,7 +121,7 @@ namespace edaa
 			ImGui::Separator();
 			ImGui::TextUnformatted("Debug views (Ctrl+Shift+M)");
 			edit(ImGui::Checkbox("Generate motion vectors", &s.config.motion_enabled));
-			ImGui::Combo("Debug view", &s.config.debug, "Off\0Motion vectors\0Vehicle mask\0Depth\0History rejection\0");
+			ImGui::Combo("Debug view", &s.config.debug, "Off\0Motion vectors\0Vehicle mask\0Depth\0History rejection\0Moving objects\0");
 			edit(ImGui::SliderFloat("Colour saturation (px)", &s.config.debug_motion_pixels, 1.0f, 64.0f, "%.0f"));
 
 			ImGui::Separator();
@@ -122,6 +138,8 @@ namespace edaa
 			ImGui::Text("Capture: %s %s", s.capture_status, s.last_capture_folder.c_str());
 
 			ImGui::Separator();
+			if (ImGui::CollapsingHeader("Moving objects (instance buffer t33)"))
+				draw_objects(s, edit);
 			if (ImGui::CollapsingHeader("Camera"))
 				draw_camera(s);
 			if (ImGui::CollapsingHeader("Diagnostics"))

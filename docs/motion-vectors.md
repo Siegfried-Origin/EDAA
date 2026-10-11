@@ -55,12 +55,47 @@ scale; written by the CPU every frame), non-instanced draws from `cb0[4..7]`
 
 Plan:
 
-1. **Capture `t33` per frame**: it is a dynamic buffer updated by the CPU
-   (Map/Unmap); copy the records at Unmap like the camera buffer.
-2. **Match records across frames by content**: static records keep a
-   bit-identical position (7049/7241 in the cockpit pair); moving ones are
-   matched by mesh (draw call: index buffer, first index, vertex buffer) and
-   nearest previous position, within a speed limit.
+1. **Capture `t33` per frame** (done, `object_motion.cpp`): RenderDoc shows
+   one `Map`/`Unmap` of the whole buffer per frame, at the start of the
+   frame (3.4 MB, 10240 records), and no GPU write
+   (`tools/rd_buffer_usage.py`). The add-on copies the first 32 bytes of each
+   record at `Unmap`, with SSE4.1 streaming loads (the mapping is
+   write-combined memory, slow to read otherwise).
+2. **Match records across frames by content** (done, analysis only): a
+   record with a bit-identical previous position is still (or spinning if
+   its rotation changed); otherwise it takes the nearest previous record of
+   the same kind (rigid: bone base 0, or skinned) and scale within 32 m.
+   Matching must be many-to-one: the game writes several records for one
+   object (one per pass) and their number changes between frames, so a
+   one-to-one match leaves ~1600 records unmatched in the cockpit pair.
+   Bone base indices are reallocated every frame. Offline check on the
+   capture pairs:
+
+   | Pair | Records | Still | Spinning | Moving | Vehicle | Unmatched |
+   |---|---|---|---|---|---|---|
+   | Cockpit turn | 7241 | 21 | 7028 | 86 | 62 | 44 |
+   | SRV | 1163 | 1046 | 0 | 1 | 114 | 2 |
+
+   "Vehicle" = within 20 m of the camera and moving about like it (any
+   motion when the camera is still: animated cockpit parts). Asteroids only
+   spin in place, so they are "spinning", not "moving". The
+   developer overlay shows these counts live plus the camera reprojection
+   error at moving objects on screen (debug view "Moving objects"), to
+   decide whether step 3 is worth it.
+   Live results (developer overlay, 2560x1440):
+
+   | Scene | Records | Moving on screen | Camera reprojection error |
+   |---|---|---|---|
+   | Asteroid field, ship still or flying | 3300-4600 | 11-22 (slow drift) | max 0.0-0.3 px |
+   | Station concourse on foot, NPCs walking | 9000-9500 | 7-63 | max 0.1-0.9 px |
+
+   Walking NPCs move ~2 cm per frame: their root transform is within 1 px
+   of camera reprojection. Their limbs are skinned (bones in `t38`, not
+   analysed here), which is where remaining ghosting would come from.
+   Asteroids only spin in place. Checked in game: no visible ghosting on
+   walking NPCs with the TAA. **Decision (2026-10-11): step 3 is not
+   needed for now**; the analysis stays as a developer diagnostic. Revisit
+   if ghosting shows on ships passing close.
 3. **Velocity pass**: re-issue the matched instanced draws of the main
    camera into the motion texture with a velocity vertex/pixel shader that
    transforms each vertex with the current and the previous instance

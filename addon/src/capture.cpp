@@ -36,6 +36,7 @@ namespace edaa
 			{ "5_vehicle_mask", true, true, debug_view::mask, 5 },
 			{ "6_depth", true, true, debug_view::depth, 5 },
 			{ "7_history_rejection", true, true, debug_view::rejection, 5 },
+			{ "8_moving_objects", true, true, debug_view::objects, 5 },
 		};
 		constexpr int step_count = sizeof(steps) / sizeof(steps[0]);
 
@@ -270,6 +271,11 @@ namespace edaa
 		{
 			fprintf(info, "build %s\nrender size %ux%u\nresolve point %s\nstatus %s\non foot %d\nframe mode %s\nmap %s\n",
 				build_stamp, s.render_w, s.render_h, s.resolve_point, s.motion_status, s.on_foot ? 1 : 0, to_string(s.mode), s.map_reason);
+			const object_stats &o = s.objects;
+			fprintf(info, "objects: maps %u records %u still %u spinning %u moving %u vehicle %u unmatched %u visible moving %u "
+				"error max %.1f px mean %.1f px, read %.2f ms match %.2f ms\n",
+				o.buffer_maps, o.records, o.still, o.spinning, o.moving, o.vehicle, o.unmatched, o.visible_moving,
+				o.max_error_px, o.mean_error_px, o.read_ms, o.match_ms);
 			fclose(info);
 		}
 		s.config = cap.saved;

@@ -18,6 +18,7 @@ namespace edaa
 		mask = 2, // vehicle-attached mask
 		depth = 3, // linear depth, to check the depth buffer is found
 		rejection = 4, // where the TAA clipped the reprojected history (red)
+		objects = 5, // moving instances and how far camera reprojection misses them
 	};
 
 	struct settings
@@ -44,6 +45,7 @@ namespace edaa
 		int mask_stencil_bits = 0x80; // stencil bit(s) the game sets on the player's vehicle
 		float mask_distance = 4.0f; // metres: closer pixels are treated as attached to the vehicle (distance mode)
 		bool mask_auto_off_on_foot = true; // no vehicle on foot: the ground near the feet must move
+		bool object_analysis = false; // developer: read t33 and match instances across frames
 		int debug = 0; // debug_view
 		float debug_motion_pixels = 16.0f; // motion that saturates the debug colours
 	};
@@ -82,6 +84,31 @@ namespace edaa
 		camera_update updates[max_updates]; // first perspective updates of the frame
 		int update_count = 0;
 		int camera_count = 0; // distinct cameras used by scene draws
+	};
+
+	// A moving instance on screen (object_motion.cpp), for the debug view.
+	struct object_marker
+	{
+		enum kind_t : int { moving = 1, vehicle = 2, spinning = 3 };
+		float x = 0, y = 0; // current position, UV
+		float offset_x = 0, offset_y = 0; // ghost offset in UV: true previous position - camera reprojection
+		float error_px = 0; // length of the offset in render pixels
+		int kind = moving;
+	};
+
+	// Instance matching results of the last frame (object_motion.cpp).
+	struct object_stats
+	{
+		uint32_t buffer_maps = 0; // Map/Unmap of the instance buffer (t33)
+		uint32_t records = 0; // valid records read
+		uint32_t still = 0; // same position and rotation as a previous record
+		uint32_t spinning = 0; // same position, other rotation
+		uint32_t moving = 0; // matched to a previous record at another position
+		uint32_t vehicle = 0; // moving, within 20 m of the camera (player's vehicle: cockpit parts, SRV)
+		uint32_t unmatched = 0; // no previous record found (new, or moved more than 32 m)
+		uint32_t visible_moving = 0; // moving (not vehicle) records on screen
+		float max_error_px = 0, mean_error_px = 0; // camera reprojection error on them
+		float read_ms = 0, match_ms = 0; // CPU cost
 	};
 
 	// Reference frame of the scene, from how the camera position (c275) moves.
@@ -136,6 +163,12 @@ namespace edaa
 		const char *capture_status = "idle";
 		std::string last_capture_folder;
 
+		// Per-object motion analysis (developer).
+		object_stats objects;
+		static constexpr int max_markers = 128;
+		object_marker markers[max_markers];
+		int marker_count = 0;
+
 		bool dump_requested = false; // overlay button: log the next frame's camera updates
 		bool dumping = false; // logging the frame in progress
 	};
@@ -157,6 +190,10 @@ namespace edaa
 	void advance_frame(addon_state &s);
 	// Makes the frame's largest G-buffer depth the scene depth (state locked).
 	void use_depth_candidate(addon_state &s);
+
+	// Called at Present with the state locked, after finish_camera_frame: matches
+	// the instance records of the frame with the previous ones (object_motion.cpp).
+	void analyse_objects(addon_state &s);
 
 	// Runs the motion vector and TAA passes, right before the game's bloom (state not locked).
 	void run_resolve(reshade::api::command_list *cmd_list);

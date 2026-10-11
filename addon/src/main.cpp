@@ -52,7 +52,7 @@ namespace edaa
 			if (runtime->is_key_pressed('M'))
 			{
 				const std::lock_guard<std::recursive_mutex> lock(s.mutex);
-				s.config.debug = (s.config.debug + 1) % 5;
+				s.config.debug = (s.config.debug + 1) % 6;
 			}
 #endif
 		}
@@ -74,6 +74,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 		}
 		edaa::register_camera_events();
 		edaa::register_frame_events();
+		edaa::register_object_events();
 		edaa::register_pass_events();
 		reshade::register_event<reshade::addon_event::reshade_present>(edaa::on_reshade_present);
 		reshade::register_overlay("EDAA", edaa::draw_overlay);
@@ -87,6 +88,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 		reshade::unregister_overlay("EDAA", edaa::draw_overlay);
 		reshade::unregister_event<reshade::addon_event::reshade_present>(edaa::on_reshade_present);
 		edaa::unregister_pass_events();
+		edaa::unregister_object_events();
 		edaa::unregister_frame_events();
 		edaa::unregister_camera_events();
 		reshade::unregister_addon(module);

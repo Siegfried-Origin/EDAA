@@ -95,7 +95,8 @@ Developer builds only:
 
 * `Ctrl+Shift+J`: jitter alone. TAA off + jitter on = compare mode.
 * `Ctrl+Shift+M`: debug view: off, motion vectors, vehicle mask, depth,
-  history rejection. Magenta = no data this frame ("Status" says why).
+  history rejection, moving objects. Magenta = no data this frame ("Status"
+  says why).
 * `Ctrl+Shift+C`: auto capture.
 
 ## Settings (overlay)
@@ -122,14 +123,23 @@ defaults" restores the values below. The debug view always starts off.
 
 * **Auto capture** (`Ctrl+Shift+C`): about 1 second; saves PNGs of the final
   image without the ReShade overlay (TAA on, TAA off, jitter only, motion
-  vectors, vehicle mask, depth, history rejection) and `info.txt` (build,
-  render size, resolve point, status) to `<capture folder>/<date_time>/`,
+  vectors, vehicle mask, depth, history rejection, moving objects) and
+  `info.txt` (build, render size, resolve point, status, moving object
+  statistics) to `<capture folder>/<date_time>/`,
   and traces that frame into `ReShade.log`. Keep doing the same thing
   (still, or turning steadily) during the capture.
 * **Frame trace** ("Dump/trace next frame"): one frame of render target
   bindings and draws in `ReShade.log`, with pixel shader hash, depth test /
   write, blending, jitter and the position of the TAA resolve. It is how the
   HUD pass was located.
+* **Moving objects** section: reads the instance buffer `t33` each frame,
+  matches its records with the previous frame and shows how many are still,
+  spinning, moving, part of the player's vehicle or unmatched, the camera
+  reprojection error on moving objects on screen (max/mean pixels) and the
+  CPU cost. The "Moving objects" debug view draws a ring on each (yellow to
+  red with the error, cyan for the vehicle) and a line to where its TAA
+  ghost would be. Off unless the section's checkbox or the debug view is on.
+  See [motion-vectors.md](motion-vectors.md) section 3.
 * **Diagnostics** section: camera buffer updates of the last frame with the
   raw registers.
 * Crash dumps: `tools/minidump_info.py` (exception and stack without a

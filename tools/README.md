@@ -17,6 +17,7 @@ Errors are written to `<Out>\log.txt`.
 | `rd_buffer_dump.py` | Raw buffer contents at an event -> `.txt` and `.bin` | `EID;RES:OFFSET:SIZE` |
 | `rd_check_depth.py` | Compare post-VS clip depth of a draw with the depth buffer -> `depth_<eid>.txt` | `5001` |
 | `rd_stencil.py` | Stencil values of the scene depth at an event (histogram, PNG, grid) | `6723` |
+| `rd_buffer_usage.py` | How a buffer is written: creation flags, usage per event (CPU write, copy, UAV, SRV), Map/Update/Copy calls -> `usage_<res>.txt` | `56917` |
 | `rd_probe.py` | Print the RenderDoc API surface (dev helper) | - |
 | `rdlib.py` | Shared helpers (open capture, 3DMigoto FNV hash, ...) | |
 

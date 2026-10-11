@@ -10,6 +10,9 @@ namespace edaa
 	void register_frame_events();
 	void unregister_frame_events();
 
+	void register_object_events();
+	void unregister_object_events();
+
 	void register_pass_events();
 	void unregister_pass_events();
 }

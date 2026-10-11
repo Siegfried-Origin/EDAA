@@ -9,8 +9,15 @@ cbuffer motion_constants : register(b0)
 	float4 camera_delta; // xyz: current camera position - previous (c275)
 	float4 params; // xy: jitter in UV, z: near plane, w: vehicle mask distance (m)
 	float4 render_size; // w, h, 1/w, 1/h
-	float4 debug; // x: mode (1 motion, 2 mask, 3 depth, 4 history rejection), y: pixels for full colour,
+	float4 debug; // x: mode (1 motion, 2 mask, 3 depth, 4 history rejection, 5 objects), y: pixels for full colour,
 	              // z: vehicle mask source (0 stencil bits, 1 distance), w: stencil bits of the player's vehicle
+};
+
+// Moving objects debug view (object_motion.cpp), up to 128 markers.
+cbuffer object_constants : register(b1)
+{
+	float4 object_info; // x: marker count, yz: target size in pixels
+	float4 object_markers[256]; // [2i] xy: position UV, zw: ghost offset UV; [2i+1] x: error px, y: kind (1 moving, 2 vehicle, 3 spinning)
 };
 
 Texture2D<float> scene_depth : register(t0);
@@ -80,6 +87,33 @@ float4 ps_debug(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 	{
 		const float mask = mask_tex.Load(int3(px, 0));
 		return float4(lerp(depth_shade.xxx * 0.5, float3(1, 0.3, 0.1), mask), 1);
+	}
+	if (debug.x == 5)
+	{
+		// Grey scene; ring per moving object (yellow -> red as the camera
+		// reprojection error reaches debug.y pixels, cyan: player's vehicle)
+		// and a line towards where its history ghost would be.
+		float3 colour = depth_shade.xxx * 0.5;
+		const float2 p = uv * object_info.yz;
+		for (int i = 0; i < int(object_info.x); ++i)
+		{
+			const float4 m = object_markers[2 * i];
+			const float4 e = object_markers[2 * i + 1];
+			const float2 a = m.xy * object_info.yz;
+			const float2 ab = m.zw * object_info.yz;
+			const float t = saturate(dot(p - a, ab) / max(dot(ab, ab), 1e-6));
+			const bool on_line = length(p - a - ab * t) < 1.0;
+			const bool on_ring = abs(length(p - a) - 8) < 1.5;
+			if (e.y > 2.5)
+			{
+				// Spinning in place (asteroids): small green dot, to check rings land on objects.
+				if (length(p - a) < 3)
+					colour = float3(0.2, 1, 0.3);
+			}
+			else if (on_line || on_ring)
+				colour = e.y > 1.5 ? float3(0.1, 0.8, 1) : lerp(float3(1, 0.9, 0.1), float3(1, 0.1, 0.1), saturate(e.x / debug.y));
+		}
+		return float4(colour, 1);
 	}
 	if (debug.x == 4)
 	{
