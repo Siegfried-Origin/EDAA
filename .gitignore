@@ -5,3 +5,4 @@ captures/
 dist/
 *.dmp
 __pycache__/
+installer/Output/
