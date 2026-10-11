@@ -1,6 +1,6 @@
-# EDAA - temporal anti-aliasing for Elite Dangerous
+# EDAA - Temporal Anti-Aliasing for Elite Dangerous
 
-A ReShade add-on that adds TAA (temporal anti-aliasing) to Elite Dangerous
+A ReShade add-on that adds TAA (Temporal Anti-Aliasing) to Elite Dangerous
 Odyssey (DX11): sub-pixel jitter, motion vectors from the game's camera and
 depth, and a TAA resolve inserted into the game's frame before the cockpit
 HUD, bloom and tonemapping.
