@@ -1,0 +1,7 @@
+analysis/
+build/
+build-*/
+captures/
+dist/
+*.dmp
+__pycache__/
