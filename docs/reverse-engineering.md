@@ -409,5 +409,10 @@ Signatures, checked against all 12 captures:
   5-6 in every in-game frame (cockpit, station, SRV, on foot, free camera).
   The main menu and the loading screen have none either.
 
-The galaxy map was not captured; it probably shares the second signature
-(no sun shadows) but its shaders are unknown.
+* almost no G-buffer geometry: 4 G-buffer draws in the map, against 476 in
+  the main menu hangar (which has no sun shadows either) and 119 to 2873 in
+  game. "No sun shadows and fewer than 32 G-buffer draws" separates the map
+  from the menu; the loading screen (5 draws) also matches.
+
+The galaxy map was not captured; it probably matches the heuristic (no sun
+shadows, little geometry) but its shaders are unknown.

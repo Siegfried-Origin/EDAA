@@ -51,9 +51,10 @@ Per frame, in the order the game draws:
 6. **Maps** (`frame_tracking.cpp`): when the system map shaders
    (`d7e5ff175bc127a8`, `f5938f31368af521`, `723db111682fbc7b`) are drawn, or
    (option "Detect maps also by missing sun shadows", on) when the scene is
-   drawn without any sun shadow pass, the next frames get no jitter and no
-   TAA, and the history is reset when the map closes. The second rule also
-   covers the main menu and loading screens, and most likely the galaxy map.
+   drawn without any sun shadow pass and with fewer than 32 G-buffer draws,
+   the next frames get no jitter and no TAA, and the history is reset when
+   the map closes. The main menu hangar (476 G-buffer draws) keeps the TAA;
+   loading screens and most likely the galaxy map are paused.
    See reverse-engineering.md section 8.
 7. **At Present** (`passes.cpp`, `capture.cpp`): optional debug view over the
    back buffer, auto capture, next jitter phase.

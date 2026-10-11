@@ -368,6 +368,8 @@ namespace edaa
 				if (scene_draw)
 				{
 					s.current.scene_draws++;
+					if (ctx->rt0 != s.scene_color)
+						s.current.gbuffer_draws++;
 					count_scene_camera(s);
 				}
 				if (want)
@@ -463,10 +465,13 @@ namespace edaa
 	void advance_frame(addon_state &s)
 	{
 		// Map detection, applied from the next frame on: a system map shader was
-		// drawn, or (heuristic) the scene was drawn without any sun shadow pass
-		// (no orthographic camera), which every in-game frame has.
+		// drawn, or (heuristic) the scene has no sun shadow pass (no orthographic
+		// camera, which every in-game frame has) and almost no G-buffer geometry
+		// (system map: 4 draws; main menu hangar: 476; in game: 119 and more).
+		constexpr uint32_t map_max_gbuffer_draws = 32;
 		const bool no_shadows = s.current.scene_draws > 0 &&
-			s.current.camera_updates[static_cast<int>(view_kind::orthographic)] == 0;
+			s.current.camera_updates[static_cast<int>(view_kind::orthographic)] == 0 &&
+			s.current.gbuffer_draws < map_max_gbuffer_draws;
 		const bool map = s.current.map_shader_drawn || (s.config.map_detect_no_shadows && no_shadows);
 		if (map != s.map_mode)
 		{

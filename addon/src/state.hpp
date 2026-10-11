@@ -74,6 +74,7 @@ namespace edaa
 		uint32_t scene_draws = 0; // draws into the scene targets (jittered or not)
 		uint32_t scene_draws_no_camera = 0; // scene draws before any perspective camera update
 		bool map_shader_drawn = false; // a system map pixel shader was used
+		uint32_t gbuffer_draws = 0; // scene geometry draws into the G-buffer (not the HDR target)
 
 		uint32_t large_cb_maps = 0; // Map of constant buffers >= camera size
 		uint32_t large_cb_updates = 0; // UpdateSubresource of constant buffers >= camera size
