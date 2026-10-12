@@ -324,8 +324,8 @@ namespace edaa
         FILE* info = nullptr;
 
         if (_wfopen_s(&info, (cap.folder / L"info.txt").c_str(), L"w") == 0 && info != nullptr) {
-            fprintf(info, "build %s\nrender size %ux%u\nresolve point %s\nstatus %s\non foot %d\nframe mode %s\nmap %s\n",
-                build_stamp, s.render_w, s.render_h, s.resolve_point, s.motion_status, s.on_foot ? 1 : 0, to_string(s.mode), s.map_reason);
+            fprintf(info, "version %s\nbuild %s\nrender size %ux%u\nresolve point %s\nstatus %s\non foot %d\nframe mode %s\nmap %s\n",
+                version, build_stamp, s.render_w, s.render_h, s.resolve_point, s.motion_status, s.on_foot ? 1 : 0, to_string(s.mode), s.map_reason);
             const object_stats& o = s.objects;
             fprintf(info, "objects: maps %u records %u still %u spinning %u moving %u vehicle %u unmatched %u visible moving %u "
                           "error max %.1f px mean %.1f px, read %.2f ms match %.2f ms\n",

@@ -221,7 +221,7 @@ namespace edaa
         addon_state& s = state();
         const std::lock_guard<std::recursive_mutex> lock(s.mutex);
 
-        ImGui::Text("EDAA build %s%s", build_stamp, EDAA_DEVELOPER ? " (developer)" : "");
+        ImGui::Text("EDAA %s (build %s%s)", version, build_stamp, EDAA_DEVELOPER ? ", developer" : "");
         ImGui::Separator();
 
         change_tracker edit;
@@ -236,6 +236,9 @@ namespace edaa
             draw_developer(s, edit);
         }
 #endif
+
+        ImGui::Separator();
+        ImGui::TextDisabled("Fly safe, fly smooth - CMDR Siegfried-Origin");
 
         if (edit.changed) {
             save_settings(s.config);

@@ -87,7 +87,11 @@ defaults" and an "Advanced settings" section.
 `tools\package.ps1` builds and packs `EDAA.addon64` + `INSTALL.txt` into
 `dist\EDAA-<date>\` and a zip (nothing is copied into the game folder).
 Shaders in `addon/shaders/` are compiled to headers by fxc at build time.
-The overlay shows the build date/time: check it after copying a new build.
+The overlay's first line shows the version and the build date/time (both
+regenerated at every build): check it after copying a new build. The version
+is `git describe --tags --dirty` without the leading "v" (e.g.
+`0.1.0-4-g4c6fe50-dirty` between releases); the release workflow sets it to
+the tag with `-DEDAA_VERSION=<version>`.
 
 ## Install / uninstall
 

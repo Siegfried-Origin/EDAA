@@ -39,10 +39,13 @@ add_custom_command(
 	COMMENT "Compiling taa.hlsl"
 )
 
-# Build date/time shown in the overlay, refreshed on every build.
+# Version and build date/time shown in the overlay, refreshed on every build.
+# The version comes from "git describe" unless EDAA_VERSION is set (release workflow).
+set(EDAA_VERSION "" CACHE STRING "Version shown in the overlay (empty: git describe)")
 add_custom_target(edaa_build_stamp
 	COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUT}
-	COMMAND ${CMAKE_COMMAND} -DOUT=${SHADER_OUT}/build_stamp.h -P ${CMAKE_SOURCE_DIR}/addon/build_stamp.cmake
+	COMMAND ${CMAKE_COMMAND} -DOUT=${SHADER_OUT}/build_stamp.h -DSOURCE_DIR=${CMAKE_SOURCE_DIR} "-DVERSION=${EDAA_VERSION}"
+		-P ${CMAKE_SOURCE_DIR}/addon/build_stamp.cmake
 	BYPRODUCTS ${SHADER_OUT}/build_stamp.h
 	COMMENT "Updating build stamp"
 )

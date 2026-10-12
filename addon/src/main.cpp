@@ -14,6 +14,7 @@ extern "C" __declspec(dllexport) const char* DESCRIPTION =
 namespace edaa
 {
     const char* const build_stamp = EDAA_BUILD_STAMP;
+    const char* const version = EDAA_VERSION;
 
 
     addon_state& state()
@@ -87,8 +88,8 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
             reshade::register_event<reshade::addon_event::reshade_present>(edaa::on_reshade_present);
             reshade::register_overlay("EDAA", edaa::draw_overlay);
             {
-                char msg[96];
-                snprintf(msg, sizeof(msg), "EDAA: loaded, build %s", edaa::build_stamp);
+                char msg[160];
+                snprintf(msg, sizeof(msg), "EDAA: loaded, version %s, build %s", edaa::version, edaa::build_stamp);
                 reshade::log::message(reshade::log::level::info, msg);
             }
             break;

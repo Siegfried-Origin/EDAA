@@ -196,6 +196,7 @@ namespace edaa
 
     // Build identification shown in the overlay and the log.
     extern const char* const build_stamp;
+    extern const char* const version; // last git tag (+ commits since, "-dirty")
 
     // Called for each scene draw with the state locked: counts the camera in use.
     void count_scene_camera(addon_state& s);
