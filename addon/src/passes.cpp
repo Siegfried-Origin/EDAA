@@ -32,692 +32,854 @@ using namespace reshade::api;
 
 namespace edaa
 {
-	namespace
-	{
-		struct alignas(16) motion_constants
-		{
-			float inv_view_proj[16];
-			float prev_view_proj[16];
-			float camera_delta[4];
-			float params[4]; // jitter UV x/y, near, mask distance
-			float render_size[4];
-			float debug[4]; // mode, pixels for full colour
-		};
+    namespace
+    {
+        struct alignas(16) motion_constants
+        {
+            float inv_view_proj[16];
+            float prev_view_proj[16];
+            float camera_delta[4];
+            float params[4]; // jitter UV x/y, near, mask distance
+            float render_size[4];
+            float debug[4]; // mode, pixels for full colour
+        };
 
-		struct alignas(16) object_constants
-		{
-			float info[4]; // marker count, target width, height
-			float markers[addon_state::max_markers * 2][4];
-		};
+        struct alignas(16) object_constants
+        {
+            float info[4]; // marker count, target width, height
+            float markers[addon_state::max_markers * 2][4];
+        };
 
-		struct alignas(16) taa_constants
-		{
-			float render_size[4];
-			float jitter[4]; // UV x/y, unjitter flag
-			float blend[4]; // history weight, weight at high motion, reset, clip gamma
-			float flicker[4]; // anti-flicker on, minimum history weight, static clip gamma, soft off-screen
-			float hdr[4]; // HDR compression scale
-		};
+        struct alignas(16) taa_constants
+        {
+            float render_size[4];
+            float jitter[4]; // UV x/y, unjitter flag
+            float blend[4]; // history weight, weight at high motion, reset, clip gamma
+            float flicker[4]; // anti-flicker on, minimum history weight, static clip gamma, soft off-screen
+            float hdr[4]; // HDR compression scale
+        };
 
-		struct target
-		{
-			ComPtr<ID3D11Texture2D> tex;
-			ComPtr<ID3D11RenderTargetView> rtv;
-			ComPtr<ID3D11ShaderResourceView> srv;
-		};
+        struct target
+        {
+            ComPtr<ID3D11Texture2D> tex;
+            ComPtr<ID3D11RenderTargetView> rtv;
+            ComPtr<ID3D11ShaderResourceView> srv;
+        };
 
-		// Views on a game texture, recreated when the handle changes.
-		struct game_views
-		{
-			uint64_t handle = 0;
-			ComPtr<ID3D11ShaderResourceView> srv;
-			ComPtr<ID3D11RenderTargetView> rtv;
-		};
+        // Views on a game texture, recreated when the handle changes.
+        struct game_views
+        {
+            uint64_t handle = 0;
+            ComPtr<ID3D11ShaderResourceView> srv;
+            ComPtr<ID3D11RenderTargetView> rtv;
+        };
 
-		struct gpu_resources
-		{
-			ID3D11Device *device = nullptr; // not owned
-			ComPtr<ID3D11VertexShader> vs;
-			ComPtr<ID3D11PixelShader> ps_motion, ps_debug, ps_taa, ps_copy;
-			ComPtr<ID3D11Buffer> motion_cb, taa_cb, object_cb;
-			ComPtr<ID3D11SamplerState> linear_clamp;
+        struct gpu_resources
+        {
+            ID3D11Device* device = nullptr; // not owned
+            ComPtr<ID3D11VertexShader> vs;
+            ComPtr<ID3D11PixelShader> ps_motion, ps_debug, ps_taa, ps_copy;
+            ComPtr<ID3D11Buffer> motion_cb, taa_cb, object_cb;
+            ComPtr<ID3D11SamplerState> linear_clamp;
 
-			uint32_t width = 0, height = 0;
-			target motion, mask, history[2];
-			int history_index = 0; // history[history_index] = last output
-			bool history_valid = false;
+            uint32_t width = 0, height = 0;
+            target motion, mask, history[2];
+            int history_index = 0; // history[history_index] = last output
+            bool history_valid = false;
 
-			game_views depth, color;
-			ComPtr<ID3D11ShaderResourceView> stencil_srv; // stencil plane of the scene depth (null if none)
-		};
+            game_views depth, color;
+            ComPtr<ID3D11ShaderResourceView> stencil_srv; // stencil plane of the scene depth (null if none)
+        };
 
-		// Releasing a D3D11 object can raise destroy_resource synchronously, on
-		// the same thread, while gpu_mutex is held: that callback must never lock
-		// it. It only reads 'watched_*' (game textures our views keep alive).
-		std::mutex gpu_mutex;
-		gpu_resources gpu;
-		std::atomic<uint64_t> watched_depth { 0 }, watched_color { 0 };
+        // Releasing a D3D11 object can raise destroy_resource synchronously, on
+        // the same thread, while gpu_mutex is held: that callback must never lock
+        // it. It only reads 'watched_*' (game textures our views keep alive).
+        std::mutex gpu_mutex;
+        gpu_resources gpu;
+        std::atomic<uint64_t> watched_depth{ 0 }, watched_color{ 0 };
 
-		// Inverse of a 4x4 matrix (row-major), in double precision. Returns false if singular.
-		bool invert(const float m[16], float out[16])
-		{
-			double a[4][8];
-			for (int r = 0; r < 4; ++r)
-				for (int c = 0; c < 8; ++c)
-					a[r][c] = c < 4 ? m[r * 4 + c] : (c - 4 == r ? 1.0 : 0.0);
-			for (int c = 0; c < 4; ++c)
-			{
-				int pivot = c;
-				for (int r = c + 1; r < 4; ++r)
-					if (std::abs(a[r][c]) > std::abs(a[pivot][c]))
-						pivot = r;
-				if (std::abs(a[pivot][c]) < 1e-12)
-					return false;
-				for (int k = 0; k < 8; ++k)
-					std::swap(a[c][k], a[pivot][k]);
-				const double inv = 1.0 / a[c][c];
-				for (int k = 0; k < 8; ++k)
-					a[c][k] *= inv;
-				for (int r = 0; r < 4; ++r)
-				{
-					if (r == c)
-						continue;
-					const double f = a[r][c];
-					for (int k = 0; k < 8; ++k)
-						a[r][k] -= f * a[c][k];
-				}
-			}
-			for (int r = 0; r < 4; ++r)
-				for (int c = 0; c < 4; ++c)
-					out[r * 4 + c] = static_cast<float>(a[r][c + 4]);
-			return true;
-		}
 
-		bool create_buffer(UINT size, ComPtr<ID3D11Buffer> &buffer)
-		{
-			D3D11_BUFFER_DESC desc = {};
-			desc.ByteWidth = size;
-			desc.Usage = D3D11_USAGE_DYNAMIC;
-			desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-			desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-			return SUCCEEDED(gpu.device->CreateBuffer(&desc, nullptr, &buffer));
-		}
+        // Inverse of a 4x4 matrix (row-major), in double precision. Returns false if singular.
+        bool invert(const float m[16], float out[16])
+        {
+            double a[4][8];
 
-		bool create_shaders(ID3D11Device *device)
-		{
-			if (gpu.device == device && gpu.vs)
-				return true;
-			watched_depth = 0;
-			watched_color = 0;
-			gpu = {};
-			gpu.device = device;
-			D3D11_SAMPLER_DESC sampler = {};
-			sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-			sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-			sampler.MaxLOD = D3D11_FLOAT32_MAX;
-			return SUCCEEDED(device->CreateVertexShader(g_vs_fullscreen, sizeof(g_vs_fullscreen), nullptr, &gpu.vs)) &&
-				SUCCEEDED(device->CreatePixelShader(g_ps_motion, sizeof(g_ps_motion), nullptr, &gpu.ps_motion)) &&
-				SUCCEEDED(device->CreatePixelShader(g_ps_debug, sizeof(g_ps_debug), nullptr, &gpu.ps_debug)) &&
-				SUCCEEDED(device->CreatePixelShader(g_ps_taa, sizeof(g_ps_taa), nullptr, &gpu.ps_taa)) &&
-				SUCCEEDED(device->CreatePixelShader(g_ps_copy, sizeof(g_ps_copy), nullptr, &gpu.ps_copy)) &&
-				SUCCEEDED(device->CreateSamplerState(&sampler, &gpu.linear_clamp)) &&
-				create_buffer(sizeof(motion_constants), gpu.motion_cb) &&
-				create_buffer(sizeof(taa_constants), gpu.taa_cb) &&
-				create_buffer(sizeof(object_constants), gpu.object_cb);
-		}
+            for (int r = 0; r < 4; ++r) {
+                for (int c = 0; c < 8; ++c) {
+                    a[r][c] = c < 4 ? m[r * 4 + c] : (c - 4 == r ? 1.0 : 0.0);
+                }
+            }
 
-		bool create_target(DXGI_FORMAT format, target &t)
-		{
-			t = {};
-			D3D11_TEXTURE2D_DESC desc = {};
-			desc.Width = gpu.width;
-			desc.Height = gpu.height;
-			desc.MipLevels = 1;
-			desc.ArraySize = 1;
-			desc.Format = format;
-			desc.SampleDesc.Count = 1;
-			desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-			return SUCCEEDED(gpu.device->CreateTexture2D(&desc, nullptr, &t.tex)) &&
-				SUCCEEDED(gpu.device->CreateRenderTargetView(t.tex.Get(), nullptr, &t.rtv)) &&
-				SUCCEEDED(gpu.device->CreateShaderResourceView(t.tex.Get(), nullptr, &t.srv));
-		}
+            for (int c = 0; c < 4; ++c) {
+                int pivot = c;
 
-		bool create_targets(uint32_t width, uint32_t height)
-		{
-			if (gpu.width == width && gpu.height == height && gpu.history[1].rtv)
-				return true;
-			gpu.width = width;
-			gpu.height = height;
-			gpu.history_valid = false;
-			return create_target(DXGI_FORMAT_R16G16_FLOAT, gpu.motion) &&
-				create_target(DXGI_FORMAT_R8_UNORM, gpu.mask) &&
-				create_target(DXGI_FORMAT_R16G16B16A16_FLOAT, gpu.history[0]) &&
-				create_target(DXGI_FORMAT_R16G16B16A16_FLOAT, gpu.history[1]);
-		}
+                for (int r = c + 1; r < 4; ++r) {
+                    if (std::abs(a[r][c]) > std::abs(a[pivot][c])) {
+                        pivot = r;
+                    }
+                }
 
-		// Our views keep the game texture alive: forget the old handle before
-		// releasing them so destroy_resource ignores it.
-		void reset_views(game_views &v, std::atomic<uint64_t> &watched)
-		{
-			v.handle = 0;
-			watched = 0;
-			v.srv.Reset();
-			v.rtv.Reset();
-		}
+                if (std::abs(a[pivot][c]) < 1e-12) {
+                    return false;
+                }
 
-		// Shader view of the game's depth buffer (typeless depth formats only).
-		const char *create_depth_view(uint64_t handle)
-		{
-			if (gpu.depth.handle == handle && gpu.depth.srv)
-				return nullptr;
-			reset_views(gpu.depth, watched_depth);
-			gpu.stencil_srv.Reset();
-			auto *const resource = reinterpret_cast<ID3D11Resource *>(handle);
-			ComPtr<ID3D11Texture2D> tex;
-			if (FAILED(resource->QueryInterface(IID_PPV_ARGS(&tex))))
-				return "depth buffer is not a 2D texture";
-			D3D11_TEXTURE2D_DESC desc;
-			tex->GetDesc(&desc);
-			if ((desc.BindFlags & D3D11_BIND_SHADER_RESOURCE) == 0)
-				return "depth buffer cannot be read by shaders";
+                for (int k = 0; k < 8; ++k) {
+                    std::swap(a[c][k], a[pivot][k]);
+                }
 
-			D3D11_SHADER_RESOURCE_VIEW_DESC view = {};
-			view.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-			view.Texture2D.MipLevels = 1;
-			switch (desc.Format)
-			{
-			case DXGI_FORMAT_R32G8X24_TYPELESS: view.Format = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS; break;
-			case DXGI_FORMAT_R24G8_TYPELESS: view.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; break;
-			case DXGI_FORMAT_R32_TYPELESS: view.Format = DXGI_FORMAT_R32_FLOAT; break;
-			default: return "unexpected depth buffer format";
-			}
-			if (FAILED(gpu.device->CreateShaderResourceView(resource, &view, &gpu.depth.srv)))
-				return "cannot create depth buffer view";
-			// Stencil plane: the game sets bit 0x80 on its own vehicle (cockpit, SRV).
-			D3D11_SHADER_RESOURCE_VIEW_DESC stencil = view;
-			stencil.Format = desc.Format == DXGI_FORMAT_R32G8X24_TYPELESS ? DXGI_FORMAT_X32_TYPELESS_G8X24_UINT :
-				desc.Format == DXGI_FORMAT_R24G8_TYPELESS ? DXGI_FORMAT_X24_TYPELESS_G8_UINT : DXGI_FORMAT_UNKNOWN;
-			if (stencil.Format != DXGI_FORMAT_UNKNOWN)
-				gpu.device->CreateShaderResourceView(resource, &stencil, &gpu.stencil_srv);
-			gpu.depth.handle = handle;
-			watched_depth = handle;
-			return nullptr;
-		}
+                const double inv = 1.0 / a[c][c];
 
-		// Shader and render target views of the game's HDR scene target.
-		const char *create_color_views(uint64_t handle)
-		{
-			if (gpu.color.handle == handle && gpu.color.srv && gpu.color.rtv)
-				return nullptr;
-			reset_views(gpu.color, watched_color);
-			auto *const resource = reinterpret_cast<ID3D11Resource *>(handle);
-			ComPtr<ID3D11Texture2D> tex;
-			if (FAILED(resource->QueryInterface(IID_PPV_ARGS(&tex))))
-				return "scene colour is not a 2D texture";
-			D3D11_TEXTURE2D_DESC desc;
-			tex->GetDesc(&desc);
-			if ((desc.BindFlags & D3D11_BIND_SHADER_RESOURCE) == 0 || (desc.BindFlags & D3D11_BIND_RENDER_TARGET) == 0)
-				return "scene colour cannot be read and written";
-			// Typeless textures need an explicit format; R11G11B10 has no typeless variant.
-			const DXGI_FORMAT format = desc.Format == DXGI_FORMAT_R16G16B16A16_TYPELESS ? DXGI_FORMAT_R16G16B16A16_FLOAT : desc.Format;
-			D3D11_SHADER_RESOURCE_VIEW_DESC srv = {};
-			srv.Format = format;
-			srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-			srv.Texture2D.MipLevels = 1;
-			D3D11_RENDER_TARGET_VIEW_DESC rtv = {};
-			rtv.Format = format;
-			rtv.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-			if (FAILED(gpu.device->CreateShaderResourceView(resource, &srv, &gpu.color.srv)) ||
-				FAILED(gpu.device->CreateRenderTargetView(resource, &rtv, &gpu.color.rtv)))
-				return "cannot create scene colour views";
-			gpu.color.handle = handle;
-			watched_color = handle;
-			return nullptr;
-		}
+                for (int k = 0; k < 8; ++k) {
+                    a[c][k] *= inv;
+                }
 
-		// Saves and restores the pipeline state touched by the passes.
-		struct state_backup
-		{
-			static constexpr UINT srv_count = 6;
-			ID3D11DeviceContext *ctx;
-			ID3D11RenderTargetView *rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
-			ID3D11DepthStencilView *dsv = nullptr;
-			D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
-			UINT viewport_count = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
-			ID3D11RasterizerState *rs = nullptr;
-			ID3D11BlendState *blend = nullptr;
-			FLOAT blend_factor[4] = {};
-			UINT sample_mask = 0;
-			ID3D11DepthStencilState *ds = nullptr;
-			UINT stencil_ref = 0;
-			ID3D11InputLayout *layout = nullptr;
-			D3D11_PRIMITIVE_TOPOLOGY topology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
-			ID3D11VertexShader *vs = nullptr;
-			ID3D11HullShader *hs = nullptr;
-			ID3D11DomainShader *ds_shader = nullptr;
-			ID3D11GeometryShader *gs = nullptr;
-			ID3D11PixelShader *ps = nullptr;
-			ID3D11ShaderResourceView *ps_srvs[srv_count] = {};
-			ID3D11SamplerState *ps_sampler = nullptr;
-			ID3D11Buffer *ps_cbs[2] = {};
+                for (int r = 0; r < 4; ++r) {
+                    if (r == c) {
+                        continue;
+                    }
 
-			explicit state_backup(ID3D11DeviceContext *context) : ctx(context)
-			{
-				ctx->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs, &dsv);
-				ctx->RSGetViewports(&viewport_count, viewports);
-				ctx->RSGetState(&rs);
-				ctx->OMGetBlendState(&blend, blend_factor, &sample_mask);
-				ctx->OMGetDepthStencilState(&ds, &stencil_ref);
-				ctx->IAGetInputLayout(&layout);
-				ctx->IAGetPrimitiveTopology(&topology);
-				ctx->VSGetShader(&vs, nullptr, nullptr);
-				ctx->HSGetShader(&hs, nullptr, nullptr);
-				ctx->DSGetShader(&ds_shader, nullptr, nullptr);
-				ctx->GSGetShader(&gs, nullptr, nullptr);
-				ctx->PSGetShader(&ps, nullptr, nullptr);
-				ctx->PSGetShaderResources(0, srv_count, ps_srvs);
-				ctx->PSGetSamplers(0, 1, &ps_sampler);
-				ctx->PSGetConstantBuffers(0, 2, ps_cbs);
-			}
+                    const double f = a[r][c];
 
-			~state_backup()
-			{
-				ID3D11ShaderResourceView *const none[srv_count] = {};
-				ctx->PSSetShaderResources(0, srv_count, none);
-				ctx->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs, dsv);
-				ctx->RSSetViewports(viewport_count, viewports);
-				ctx->RSSetState(rs);
-				ctx->OMSetBlendState(blend, blend_factor, sample_mask);
-				ctx->OMSetDepthStencilState(ds, stencil_ref);
-				ctx->IASetInputLayout(layout);
-				ctx->IASetPrimitiveTopology(topology);
-				ctx->VSSetShader(vs, nullptr, 0);
-				ctx->HSSetShader(hs, nullptr, 0);
-				ctx->DSSetShader(ds_shader, nullptr, 0);
-				ctx->GSSetShader(gs, nullptr, 0);
-				ctx->PSSetShader(ps, nullptr, 0);
-				ctx->PSSetShaderResources(0, srv_count, ps_srvs);
-				ctx->PSSetSamplers(0, 1, &ps_sampler);
-				ctx->PSSetConstantBuffers(0, 2, ps_cbs);
+                    for (int k = 0; k < 8; ++k) {
+                        a[r][k] -= f * a[c][k];
+                    }
+                }
+            }
 
-				for (auto *p : rtvs) if (p) p->Release();
-				for (auto *p : ps_srvs) if (p) p->Release();
-				for (auto *p : ps_cbs) if (p) p->Release();
-				IUnknown *others[] = { dsv, rs, blend, ds, layout, vs, hs, ds_shader, gs, ps, ps_sampler };
-				for (auto *p : others) if (p) p->Release();
-			}
-		};
+            for (int r = 0; r < 4; ++r) {
+                for (int c = 0; c < 4; ++c) {
+                    out[r * 4 + c] = static_cast<float>(a[r][c + 4]);
+                }
+            }
 
-		void set_viewport(ID3D11DeviceContext *ctx, float w, float h)
-		{
-			const D3D11_VIEWPORT vp = { 0, 0, w, h, 0, 1 };
-			ctx->RSSetViewports(1, &vp);
-		}
+            return true;
+        }
 
-		template <typename T>
-		bool upload(ID3D11DeviceContext *ctx, ID3D11Buffer *buffer, const T &data)
-		{
-			D3D11_MAPPED_SUBRESOURCE mapped;
-			if (FAILED(ctx->Map(buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
-				return false;
-			std::memcpy(mapped.pData, &data, sizeof(data));
-			ctx->Unmap(buffer, 0);
-			return true;
-		}
 
-		// Common pipeline setup for fullscreen passes.
-		void bind_fullscreen(ID3D11DeviceContext *ctx)
-		{
-			ctx->IASetInputLayout(nullptr);
-			ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-			ctx->VSSetShader(gpu.vs.Get(), nullptr, 0);
-			ctx->HSSetShader(nullptr, nullptr, 0);
-			ctx->DSSetShader(nullptr, nullptr, 0);
-			ctx->GSSetShader(nullptr, nullptr, 0);
-			ctx->RSSetState(nullptr);
-			ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
-			ctx->OMSetDepthStencilState(nullptr, 0);
-			ID3D11SamplerState *const samplers[] = { gpu.linear_clamp.Get() };
-			ctx->PSSetSamplers(0, 1, samplers);
-		}
+        bool create_buffer(UINT size, ComPtr<ID3D11Buffer>& buffer)
+        {
+            D3D11_BUFFER_DESC desc = {};
+            desc.ByteWidth = size;
+            desc.Usage = D3D11_USAGE_DYNAMIC;
+            desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            return SUCCEEDED(gpu.device->CreateBuffer(&desc, nullptr, &buffer));
+        }
 
-		void bind_srvs(ID3D11DeviceContext *ctx, std::initializer_list<ID3D11ShaderResourceView *> srvs)
-		{
-			ID3D11ShaderResourceView *list[state_backup::srv_count] = {};
-			UINT i = 0;
-			for (auto *s : srvs)
-				if (i < state_backup::srv_count)
-					list[i++] = s;
-			ctx->PSSetShaderResources(0, state_backup::srv_count, list);
-		}
 
-		// Inputs captured with the state locked.
-		struct resolve_inputs
-		{
-			camera_frame camera, prev_camera;
-			float jitter_x = 0, jitter_y = 0;
-			uint32_t render_w = 0, render_h = 0;
-			uint64_t scene_depth = 0, scene_color = 0;
-			bool camera_cut = false;
-			settings config;
-		};
+        bool create_shaders(ID3D11Device* device)
+        {
+            if (gpu.device == device && gpu.vs) {
+                return true;
+            }
 
-		// Most-used camera of the frame in progress (state locked).
-		camera_frame current_main_camera(const addon_state &s)
-		{
-			camera_frame best;
-			for (int i = 0; i < s.candidate_count; ++i)
-				if (s.candidates[i].scene_draws > best.scene_draws)
-					best = s.candidates[i];
-			return best;
-		}
+            watched_depth = 0;
+            watched_color = 0;
+            gpu = {};
+            gpu.device = device;
+            D3D11_SAMPLER_DESC sampler = {};
+            sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+            sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+            sampler.MaxLOD = D3D11_FLOAT32_MAX;
+            return SUCCEEDED(device->CreateVertexShader(g_vs_fullscreen, sizeof(g_vs_fullscreen), nullptr, &gpu.vs)) &&
+                SUCCEEDED(device->CreatePixelShader(g_ps_motion, sizeof(g_ps_motion), nullptr, &gpu.ps_motion)) &&
+                SUCCEEDED(device->CreatePixelShader(g_ps_debug, sizeof(g_ps_debug), nullptr, &gpu.ps_debug)) &&
+                SUCCEEDED(device->CreatePixelShader(g_ps_taa, sizeof(g_ps_taa), nullptr, &gpu.ps_taa)) &&
+                SUCCEEDED(device->CreatePixelShader(g_ps_copy, sizeof(g_ps_copy), nullptr, &gpu.ps_copy)) &&
+                SUCCEEDED(device->CreateSamplerState(&sampler, &gpu.linear_clamp)) &&
+                create_buffer(sizeof(motion_constants), gpu.motion_cb) &&
+                create_buffer(sizeof(taa_constants), gpu.taa_cb) &&
+                create_buffer(sizeof(object_constants), gpu.object_cb);
+        }
 
-		// On foot, the body and weapon are drawn into the scene with their own
-		// camera (other near plane, 0.0675 vs 0.025); ships and the SRV are not.
-		bool first_person_body_drawn(const addon_state &s, const camera_frame &main)
-		{
-			for (int i = 0; i < s.candidate_count; ++i)
-				if (s.candidates[i].scene_draws > 0 && std::fabs(s.candidates[i].info.near_plane - main.info.near_plane) > 1e-4f)
-					return true;
-			return false;
-		}
 
-		// Large jump or rotation between frames: history is not reusable.
-		bool is_camera_cut(const camera_frame &a, const camera_frame &b)
-		{
-			float d2 = 0, dot = 0;
-			for (int i = 0; i < 3; ++i)
-			{
-				const float d = a.position[i] - b.position[i];
-				d2 += d * d;
-				dot += a.info.forward[i] * b.info.forward[i];
-			}
-			return d2 > 200.0f * 200.0f || dot < 0.94f; // 200 m or ~20 deg in one frame
-		}
+        bool create_target(DXGI_FORMAT format, target& t)
+        {
+            t = {};
+            D3D11_TEXTURE2D_DESC desc = {};
+            desc.Width = gpu.width;
+            desc.Height = gpu.height;
+            desc.MipLevels = 1;
+            desc.ArraySize = 1;
+            desc.Format = format;
+            desc.SampleDesc.Count = 1;
+            desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            return SUCCEEDED(gpu.device->CreateTexture2D(&desc, nullptr, &t.tex)) &&
+                SUCCEEDED(gpu.device->CreateRenderTargetView(t.tex.Get(), nullptr, &t.rtv)) &&
+                SUCCEEDED(gpu.device->CreateShaderResourceView(t.tex.Get(), nullptr, &t.srv));
+        }
 
-		const char *resolve(ID3D11Device *device, ID3D11DeviceContext *ctx, const resolve_inputs &in)
-		{
-			if (in.render_w == 0 || in.scene_depth == 0 || in.scene_color == 0)
-				return "waiting for the scene (G-buffer depth / HDR target)";
-			if (!in.camera.valid || !in.prev_camera.valid)
-				return "waiting for two frames with a main camera";
 
-			motion_constants mc = {};
-			if (!invert(in.camera.view_proj, mc.inv_view_proj))
-				return "main viewProj is not invertible";
-			std::memcpy(mc.prev_view_proj, in.prev_camera.view_proj, sizeof(mc.prev_view_proj));
-			for (int i = 0; i < 3; ++i)
-				mc.camera_delta[i] = in.camera.position[i] - in.prev_camera.position[i];
-			mc.params[0] = in.jitter_x / static_cast<float>(in.render_w);
-			mc.params[1] = in.jitter_y / static_cast<float>(in.render_h);
-			mc.params[2] = in.camera.info.near_plane;
-			mc.params[3] = in.config.mask_distance;
-			mc.render_size[0] = static_cast<float>(in.render_w);
-			mc.render_size[1] = static_cast<float>(in.render_h);
-			mc.render_size[2] = 1.0f / mc.render_size[0];
-			mc.render_size[3] = 1.0f / mc.render_size[1];
-			mc.debug[0] = static_cast<float>(in.config.debug);
-			mc.debug[1] = in.config.debug_motion_pixels;
-			mc.debug[2] = static_cast<float>(in.config.mask_source); // 0 stencil, 1 distance
-			mc.debug[3] = static_cast<float>(in.config.mask_stencil_bits);
+        bool create_targets(uint32_t width, uint32_t height)
+        {
+            if (gpu.width == width && gpu.height == height && gpu.history[1].rtv) {
+                return true;
+            }
 
-			const std::lock_guard<std::mutex> lock(gpu_mutex);
-			if (!create_shaders(device))
-				return "cannot create shaders";
-			if (!create_targets(in.render_w, in.render_h))
-				return "cannot create render targets";
-			if (const char *error = create_depth_view(in.scene_depth))
-				return error;
-			if (in.config.taa_enabled)
-				if (const char *error = create_color_views(in.scene_color))
-					return error;
-			if (!upload(ctx, gpu.motion_cb.Get(), mc))
-				return "cannot update constants";
+            gpu.width = width;
+            gpu.height = height;
+            gpu.history_valid = false;
+            return create_target(DXGI_FORMAT_R16G16_FLOAT, gpu.motion) &&
+                create_target(DXGI_FORMAT_R8_UNORM, gpu.mask) &&
+                create_target(DXGI_FORMAT_R16G16B16A16_FLOAT, gpu.history[0]) &&
+                create_target(DXGI_FORMAT_R16G16B16A16_FLOAT, gpu.history[1]);
+        }
 
-			const state_backup backup(ctx);
-			bind_fullscreen(ctx);
-			const float w = mc.render_size[0], h = mc.render_size[1];
-			set_viewport(ctx, w, h);
 
-			// 1. Motion vectors + vehicle mask.
-			bind_srvs(ctx, {});
-			ID3D11RenderTargetView *const motion_targets[] = { gpu.motion.rtv.Get(), gpu.mask.rtv.Get() };
-			ctx->OMSetRenderTargets(2, motion_targets, nullptr);
-			ID3D11Buffer *const motion_cb[] = { gpu.motion_cb.Get() };
-			ctx->PSSetConstantBuffers(0, 1, motion_cb);
-			bind_srvs(ctx, { gpu.depth.srv.Get(), nullptr, nullptr, nullptr, gpu.stencil_srv.Get() });
-			ctx->PSSetShader(gpu.ps_motion.Get(), nullptr, 0);
-			ctx->Draw(3, 0);
+        // Our views keep the game texture alive: forget the old handle before
+        // releasing them so destroy_resource ignores it.
+        void reset_views(game_views& v, std::atomic<uint64_t>& watched)
+        {
+            v.handle = 0;
+            watched = 0;
+            v.srv.Reset();
+            v.rtv.Reset();
+        }
 
-			if (!in.config.taa_enabled)
-			{
-				gpu.history_valid = false;
-				return nullptr;
-			}
 
-			// 2. TAA: scene + history -> other history buffer.
-			taa_constants tc = {};
-			std::memcpy(tc.render_size, mc.render_size, sizeof(tc.render_size));
-			tc.jitter[0] = mc.params[0];
-			tc.jitter[1] = mc.params[1];
-			tc.jitter[2] = in.config.taa_unjitter ? 1.0f : 0.0f;
-			tc.jitter[3] = in.config.taa_reconstruction ? 1.0f : 0.0f;
-			tc.blend[0] = in.config.taa_history_weight;
-			tc.blend[1] = in.config.taa_history_weight_motion;
-			tc.blend[2] = (!gpu.history_valid || in.camera_cut) ? 1.0f : 0.0f;
-			tc.blend[3] = in.config.taa_clip_gamma;
-			tc.flicker[0] = in.config.taa_anti_flicker ? 1.0f : 0.0f;
-			tc.flicker[1] = in.config.taa_history_weight_min;
-			tc.flicker[2] = in.config.taa_clip_gamma_static;
-			tc.flicker[3] = in.config.taa_soft_offscreen ? 1.0f : 0.0f;
-			tc.hdr[0] = in.config.taa_hdr_scale;
-			if (!upload(ctx, gpu.taa_cb.Get(), tc))
-				return "cannot update constants";
+        // Shader view of the game's depth buffer (typeless depth formats only).
+        const char* create_depth_view(uint64_t handle)
+        {
+            if (gpu.depth.handle == handle && gpu.depth.srv) {
+                return nullptr;
+            }
 
-			const target &prev = gpu.history[gpu.history_index];
-			const target &next = gpu.history[1 - gpu.history_index];
-			bind_srvs(ctx, {});
-			ID3D11RenderTargetView *const taa_target[] = { next.rtv.Get() };
-			ctx->OMSetRenderTargets(1, taa_target, nullptr);
-			ID3D11Buffer *const taa_cb[] = { gpu.taa_cb.Get() };
-			ctx->PSSetConstantBuffers(0, 1, taa_cb);
-			bind_srvs(ctx, { gpu.color.srv.Get(), prev.srv.Get(), gpu.motion.srv.Get(), gpu.depth.srv.Get() });
-			ctx->PSSetShader(gpu.ps_taa.Get(), nullptr, 0);
-			ctx->Draw(3, 0);
+            reset_views(gpu.depth, watched_depth);
+            gpu.stencil_srv.Reset();
+            auto* const resource = reinterpret_cast<ID3D11Resource*>(handle);
+            ComPtr<ID3D11Texture2D> tex;
 
-			// 3. Copy back into the game's scene target.
-			bind_srvs(ctx, {});
-			ID3D11RenderTargetView *const scene_target[] = { gpu.color.rtv.Get() };
-			ctx->OMSetRenderTargets(1, scene_target, nullptr);
-			bind_srvs(ctx, { nullptr, next.srv.Get() });
-			ctx->PSSetShader(gpu.ps_copy.Get(), nullptr, 0);
-			ctx->Draw(3, 0);
+            if (FAILED(resource->QueryInterface(IID_PPV_ARGS(&tex)))) {
+                return "depth buffer is not a 2D texture";
+            }
 
-			gpu.history_index = 1 - gpu.history_index;
-			gpu.history_valid = true;
-			return nullptr;
-		}
+            D3D11_TEXTURE2D_DESC desc;
+            tex->GetDesc(&desc);
 
-		// Debug view over the back buffer at Present (magenta: no data this frame).
-		void draw_debug(ID3D11Device *device, ID3D11DeviceContext *ctx, ID3D11Resource *back_buffer, bool have_data, const settings &config,
-			const object_marker *markers, int marker_count)
-		{
-			ComPtr<ID3D11RenderTargetView> rtv;
-			ComPtr<ID3D11Texture2D> tex;
-			if (back_buffer == nullptr || FAILED(back_buffer->QueryInterface(IID_PPV_ARGS(&tex))) ||
-				FAILED(device->CreateRenderTargetView(back_buffer, nullptr, &rtv)))
-				return;
-			const std::lock_guard<std::mutex> lock(gpu_mutex);
-			if (!have_data || !gpu.vs || !gpu.motion.srv || !gpu.depth.srv)
-			{
-				const float magenta[4] = { 0.6f, 0.0f, 0.6f, 1.0f };
-				ctx->ClearRenderTargetView(rtv.Get(), magenta);
-				return;
-			}
-			// The motion constants of this frame are still in motion_cb; only the mode may differ.
-			D3D11_TEXTURE2D_DESC desc;
-			tex->GetDesc(&desc);
-			if (config.debug == static_cast<int>(debug_view::objects))
-			{
-				object_constants oc = {};
-				oc.info[0] = static_cast<float>(marker_count);
-				oc.info[1] = static_cast<float>(desc.Width);
-				oc.info[2] = static_cast<float>(desc.Height);
-				for (int i = 0; i < marker_count; ++i)
-				{
-					const object_marker &m = markers[i];
-					const float a[4] = { m.x, m.y, m.offset_x, m.offset_y };
-					const float b[4] = { m.error_px, static_cast<float>(m.kind), 0, 0 };
-					std::memcpy(oc.markers[2 * i], a, sizeof(a));
-					std::memcpy(oc.markers[2 * i + 1], b, sizeof(b));
-				}
-				if (!upload(ctx, gpu.object_cb.Get(), oc))
-					return;
-			}
-			const state_backup backup(ctx);
-			bind_fullscreen(ctx);
-			ID3D11RenderTargetView *const targets[] = { rtv.Get() };
-			ctx->OMSetRenderTargets(1, targets, nullptr);
-			set_viewport(ctx, static_cast<float>(desc.Width), static_cast<float>(desc.Height));
-			ID3D11Buffer *const cb[] = { gpu.motion_cb.Get(), gpu.object_cb.Get() };
-			ctx->PSSetConstantBuffers(0, 2, cb);
-			bind_srvs(ctx, { gpu.depth.srv.Get(), gpu.motion.srv.Get(), gpu.mask.srv.Get(), gpu.history[gpu.history_index].srv.Get(),
-				nullptr, gpu.history[1 - gpu.history_index].srv.Get() });
-			ctx->PSSetShader(gpu.ps_debug.Get(), nullptr, 0);
-			ctx->Draw(3, 0);
-		}
+            if ((desc.BindFlags & D3D11_BIND_SHADER_RESOURCE) == 0) {
+                return "depth buffer cannot be read by shaders";
+            }
 
-		void on_present(command_queue *queue, swapchain *swapchain, const rect *, const rect *, uint32_t, const rect *)
-		{
-			addon_state &s = state();
-			const resource back_buffer = swapchain->get_current_back_buffer();
-			const resource_desc bb_desc = queue->get_device()->get_resource_desc(back_buffer);
+            D3D11_SHADER_RESOURCE_VIEW_DESC view = {};
+            view.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            view.Texture2D.MipLevels = 1;
 
-			bool resolved;
-			settings config;
-			object_marker markers[addon_state::max_markers];
-			int marker_count;
-			{
-				const std::lock_guard<std::recursive_mutex> lock(s.mutex);
-				s.back_buffer_w = bb_desc.texture.width;
-				s.back_buffer_h = bb_desc.texture.height;
-				resolved = s.resolved_this_frame;
-				if (!resolved && s.render_w != 0)
-					s.motion_status = s.map_mode ? "map on screen: TAA paused" : "resolve point not reached this frame";
-				s.resolved_this_frame = false;
-				config = s.config;
-				finish_camera_frame(s);
-				analyse_objects(s);
-				marker_count = s.marker_count;
-				std::copy(s.markers, s.markers + marker_count, markers);
-				advance_frame(s);
-			}
+            switch (desc.Format) {
+                case DXGI_FORMAT_R32G8X24_TYPELESS: view.Format = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS; break;
+                case DXGI_FORMAT_R24G8_TYPELESS: view.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; break;
+                case DXGI_FORMAT_R32_TYPELESS: view.Format = DXGI_FORMAT_R32_FLOAT; break;
+                default: return "unexpected depth buffer format";
+            }
 
-			if (config.debug != static_cast<int>(debug_view::off))
-			{
-				auto *const device = reinterpret_cast<ID3D11Device *>(queue->get_device()->get_native());
-				auto *const ctx = reinterpret_cast<ID3D11DeviceContext *>(queue->get_immediate_command_list()->get_native());
-				try { draw_debug(device, ctx, reinterpret_cast<ID3D11Resource *>(back_buffer.handle), resolved, config, markers, marker_count); }
-				catch (...) {}
-			}
-			capture_on_present(queue, swapchain);
-		}
+            if (FAILED(gpu.device->CreateShaderResourceView(resource, &view, &gpu.depth.srv))) {
+                return "cannot create depth buffer view";
+            }
 
-		// Can run inside our own D3D11 calls (see gpu_mutex): no gpu_mutex here.
-		void on_destroy_resource(device *, resource resource)
-		{
-			// Game textures our views keep alive are only destroyed when we
-			// release the views ourselves: nothing to do then.
-			if (watched_depth.load() == resource.handle || watched_color.load() == resource.handle)
-				return;
-			addon_state &s = state();
-			const std::lock_guard<std::recursive_mutex> lock(s.mutex);
-			if (s.scene_depth == resource.handle || s.scene_color == resource.handle)
-			{
-				// Destroyed before we used it: detect the scene again.
-				s.scene_depth = s.scene_color = 0;
-				s.render_w = s.render_h = 0;
-			}
-			if (s.depth_candidate == resource.handle || s.color_candidate == resource.handle)
-			{
-				s.depth_candidate = s.color_candidate = 0;
-				s.candidate_w = s.candidate_h = 0;
-			}
-		}
+            // Stencil plane: the game sets bit 0x80 on its own vehicle (cockpit, SRV).
+            D3D11_SHADER_RESOURCE_VIEW_DESC stencil = view;
+            stencil.Format = desc.Format == DXGI_FORMAT_R32G8X24_TYPELESS ? DXGI_FORMAT_X32_TYPELESS_G8X24_UINT : desc.Format == DXGI_FORMAT_R24G8_TYPELESS ? DXGI_FORMAT_X24_TYPELESS_G8_UINT
+                                                                                                                                                            : DXGI_FORMAT_UNKNOWN;
 
-		void on_destroy_device(device *)
-		{
-			const std::lock_guard<std::mutex> lock(gpu_mutex);
-			watched_depth = 0;
-			watched_color = 0;
-			gpu = {};
-		}
-	}
+            if (stencil.Format != DXGI_FORMAT_UNKNOWN) {
+                gpu.device->CreateShaderResourceView(resource, &stencil, &gpu.stencil_srv);
+            }
 
-	void run_resolve(command_list *cmd_list)
-	{
-		addon_state &s = state();
-		resolve_inputs in;
-		{
-			const std::lock_guard<std::recursive_mutex> lock(s.mutex);
-			if (s.resolved_this_frame)
-				return;
-			s.resolved_this_frame = true;
-			if (s.dumping)
-				reshade::log::message(reshade::log::level::info, "EDAA trace: ===== TAA RESOLVE HERE =====");
-			in.camera = current_main_camera(s);
-			in.prev_camera = s.camera; // main camera of the previous frame
-			in.camera_cut = in.camera.valid && in.prev_camera.valid && is_camera_cut(in.camera, in.prev_camera);
-			if (s.history_reset)
-			{
-				in.camera_cut = true;
-				s.history_reset = false;
-			}
-			s.on_foot = in.camera.valid && first_person_body_drawn(s, in.camera);
-			if (s.config.jitter_enabled)
-			{
-				in.jitter_x = s.jitter_x;
-				in.jitter_y = s.jitter_y;
-			}
-			in.render_w = s.render_w;
-			in.render_h = s.render_h;
-			in.scene_depth = s.scene_depth;
-			in.scene_color = s.scene_color;
-			in.config = s.config;
-			if (s.on_foot && s.config.mask_auto_off_on_foot && s.config.mask_source == 1)
-				in.config.mask_distance = 0.0f; // no vehicle: everything uses camera motion
-		}
+            gpu.depth.handle = handle;
+            watched_depth = handle;
+            return nullptr;
+        }
 
-		const char *error = "disabled";
-		if (in.config.motion_enabled || in.config.taa_enabled)
-		{
-			auto *const device = reinterpret_cast<ID3D11Device *>(cmd_list->get_device()->get_native());
-			auto *const ctx = reinterpret_cast<ID3D11DeviceContext *>(cmd_list->get_native());
-			// Never let an exception reach the game.
-			try { error = resolve(device, ctx, in); }
-			catch (...) { error = "internal error (exception)"; }
-		}
 
-		const std::lock_guard<std::recursive_mutex> lock(s.mutex);
-		s.motion_ok = error == nullptr;
-		s.motion_status = error != nullptr ? error : (in.config.taa_enabled ? (in.camera_cut ? "ok (history reset: camera cut)" : "ok") : "ok (motion vectors only)");
-	}
+        // Shader and render target views of the game's HDR scene target.
+        const char* create_color_views(uint64_t handle)
+        {
+            if (gpu.color.handle == handle && gpu.color.srv && gpu.color.rtv) {
+                return nullptr;
+            }
 
-	void register_pass_events()
-	{
-		reshade::register_event<reshade::addon_event::present>(on_present);
-		reshade::register_event<reshade::addon_event::destroy_resource>(on_destroy_resource);
-		reshade::register_event<reshade::addon_event::destroy_device>(on_destroy_device);
-	}
+            reset_views(gpu.color, watched_color);
+            auto* const resource = reinterpret_cast<ID3D11Resource*>(handle);
+            ComPtr<ID3D11Texture2D> tex;
 
-	void unregister_pass_events()
-	{
-		reshade::unregister_event<reshade::addon_event::present>(on_present);
-		reshade::unregister_event<reshade::addon_event::destroy_resource>(on_destroy_resource);
-		reshade::unregister_event<reshade::addon_event::destroy_device>(on_destroy_device);
-		const std::lock_guard<std::mutex> lock(gpu_mutex);
-		watched_depth = 0;
-		watched_color = 0;
-		gpu = {};
-	}
+            if (FAILED(resource->QueryInterface(IID_PPV_ARGS(&tex)))) {
+                return "scene colour is not a 2D texture";
+            }
+
+            D3D11_TEXTURE2D_DESC desc;
+            tex->GetDesc(&desc);
+
+            if ((desc.BindFlags & D3D11_BIND_SHADER_RESOURCE) == 0 || (desc.BindFlags & D3D11_BIND_RENDER_TARGET) == 0) {
+                return "scene colour cannot be read and written";
+            }
+
+            // Typeless textures need an explicit format; R11G11B10 has no typeless variant.
+            const DXGI_FORMAT format = desc.Format == DXGI_FORMAT_R16G16B16A16_TYPELESS ? DXGI_FORMAT_R16G16B16A16_FLOAT : desc.Format;
+            D3D11_SHADER_RESOURCE_VIEW_DESC srv = {};
+            srv.Format = format;
+            srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            srv.Texture2D.MipLevels = 1;
+            D3D11_RENDER_TARGET_VIEW_DESC rtv = {};
+            rtv.Format = format;
+            rtv.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+
+            if (FAILED(gpu.device->CreateShaderResourceView(resource, &srv, &gpu.color.srv)) ||
+                FAILED(gpu.device->CreateRenderTargetView(resource, &rtv, &gpu.color.rtv))) {
+                return "cannot create scene colour views";
+            }
+
+            gpu.color.handle = handle;
+            watched_color = handle;
+            return nullptr;
+        }
+
+
+        // Saves and restores the pipeline state touched by the passes.
+        struct state_backup
+        {
+            static constexpr UINT srv_count = 6;
+            ID3D11DeviceContext* ctx;
+            ID3D11RenderTargetView* rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+            ID3D11DepthStencilView* dsv = nullptr;
+            D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+            UINT viewport_count = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+            ID3D11RasterizerState* rs = nullptr;
+            ID3D11BlendState* blend = nullptr;
+            FLOAT blend_factor[4] = {};
+            UINT sample_mask = 0;
+            ID3D11DepthStencilState* ds = nullptr;
+            UINT stencil_ref = 0;
+            ID3D11InputLayout* layout = nullptr;
+            D3D11_PRIMITIVE_TOPOLOGY topology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+            ID3D11VertexShader* vs = nullptr;
+            ID3D11HullShader* hs = nullptr;
+            ID3D11DomainShader* ds_shader = nullptr;
+            ID3D11GeometryShader* gs = nullptr;
+            ID3D11PixelShader* ps = nullptr;
+            ID3D11ShaderResourceView* ps_srvs[srv_count] = {};
+            ID3D11SamplerState* ps_sampler = nullptr;
+            ID3D11Buffer* ps_cbs[2] = {};
+
+
+            explicit state_backup(ID3D11DeviceContext* context) : ctx(context)
+            {
+                ctx->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs, &dsv);
+                ctx->RSGetViewports(&viewport_count, viewports);
+                ctx->RSGetState(&rs);
+                ctx->OMGetBlendState(&blend, blend_factor, &sample_mask);
+                ctx->OMGetDepthStencilState(&ds, &stencil_ref);
+                ctx->IAGetInputLayout(&layout);
+                ctx->IAGetPrimitiveTopology(&topology);
+                ctx->VSGetShader(&vs, nullptr, nullptr);
+                ctx->HSGetShader(&hs, nullptr, nullptr);
+                ctx->DSGetShader(&ds_shader, nullptr, nullptr);
+                ctx->GSGetShader(&gs, nullptr, nullptr);
+                ctx->PSGetShader(&ps, nullptr, nullptr);
+                ctx->PSGetShaderResources(0, srv_count, ps_srvs);
+                ctx->PSGetSamplers(0, 1, &ps_sampler);
+                ctx->PSGetConstantBuffers(0, 2, ps_cbs);
+            }
+
+
+            ~state_backup()
+            {
+                ID3D11ShaderResourceView* const none[srv_count] = {};
+                ctx->PSSetShaderResources(0, srv_count, none);
+                ctx->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs, dsv);
+                ctx->RSSetViewports(viewport_count, viewports);
+                ctx->RSSetState(rs);
+                ctx->OMSetBlendState(blend, blend_factor, sample_mask);
+                ctx->OMSetDepthStencilState(ds, stencil_ref);
+                ctx->IASetInputLayout(layout);
+                ctx->IASetPrimitiveTopology(topology);
+                ctx->VSSetShader(vs, nullptr, 0);
+                ctx->HSSetShader(hs, nullptr, 0);
+                ctx->DSSetShader(ds_shader, nullptr, 0);
+                ctx->GSSetShader(gs, nullptr, 0);
+                ctx->PSSetShader(ps, nullptr, 0);
+                ctx->PSSetShaderResources(0, srv_count, ps_srvs);
+                ctx->PSSetSamplers(0, 1, &ps_sampler);
+                ctx->PSSetConstantBuffers(0, 2, ps_cbs);
+
+                for (auto* p : rtvs) {
+                    if (p) {
+                        p->Release();
+                    }
+                }
+
+                for (auto* p : ps_srvs) {
+                    if (p) {
+                        p->Release();
+                    }
+                }
+
+                for (auto* p : ps_cbs) {
+                    if (p) {
+                        p->Release();
+                    }
+                }
+
+                IUnknown* others[] = { dsv, rs, blend, ds, layout, vs, hs, ds_shader, gs, ps, ps_sampler };
+
+                for (auto* p : others) {
+                    if (p) {
+                        p->Release();
+                    }
+                }
+            }
+        };
+
+
+        void set_viewport(ID3D11DeviceContext* ctx, float w, float h)
+        {
+            const D3D11_VIEWPORT vp = { 0, 0, w, h, 0, 1 };
+            ctx->RSSetViewports(1, &vp);
+        }
+
+
+        template<typename T>
+
+
+        bool upload(ID3D11DeviceContext* ctx, ID3D11Buffer* buffer, const T& data)
+        {
+            D3D11_MAPPED_SUBRESOURCE mapped;
+
+            if (FAILED(ctx->Map(buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+                return false;
+            }
+
+            std::memcpy(mapped.pData, &data, sizeof(data));
+            ctx->Unmap(buffer, 0);
+            return true;
+        }
+
+
+        // Common pipeline setup for fullscreen passes.
+        void bind_fullscreen(ID3D11DeviceContext* ctx)
+        {
+            ctx->IASetInputLayout(nullptr);
+            ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            ctx->VSSetShader(gpu.vs.Get(), nullptr, 0);
+            ctx->HSSetShader(nullptr, nullptr, 0);
+            ctx->DSSetShader(nullptr, nullptr, 0);
+            ctx->GSSetShader(nullptr, nullptr, 0);
+            ctx->RSSetState(nullptr);
+            ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+            ctx->OMSetDepthStencilState(nullptr, 0);
+            ID3D11SamplerState* const samplers[] = { gpu.linear_clamp.Get() };
+            ctx->PSSetSamplers(0, 1, samplers);
+        }
+
+
+        void bind_srvs(ID3D11DeviceContext* ctx, std::initializer_list<ID3D11ShaderResourceView*> srvs)
+        {
+            ID3D11ShaderResourceView* list[state_backup::srv_count] = {};
+            UINT i = 0;
+
+            for (auto* s : srvs) {
+                if (i < state_backup::srv_count) {
+                    list[i++] = s;
+                }
+            }
+
+            ctx->PSSetShaderResources(0, state_backup::srv_count, list);
+        }
+
+
+        // Inputs captured with the state locked.
+        struct resolve_inputs
+        {
+            camera_frame camera, prev_camera;
+            float jitter_x = 0, jitter_y = 0;
+            uint32_t render_w = 0, render_h = 0;
+            uint64_t scene_depth = 0, scene_color = 0;
+            bool camera_cut = false;
+            settings config;
+        };
+
+
+        // Most-used camera of the frame in progress (state locked).
+        camera_frame current_main_camera(const addon_state& s)
+        {
+            camera_frame best;
+
+            for (int i = 0; i < s.candidate_count; ++i) {
+                if (s.candidates[i].scene_draws > best.scene_draws) {
+                    best = s.candidates[i];
+                }
+            }
+
+            return best;
+        }
+
+
+        // On foot, the body and weapon are drawn into the scene with their own
+        // camera (other near plane, 0.0675 vs 0.025); ships and the SRV are not.
+        bool first_person_body_drawn(const addon_state& s, const camera_frame& main)
+        {
+            for (int i = 0; i < s.candidate_count; ++i) {
+                if (s.candidates[i].scene_draws > 0 && std::fabs(s.candidates[i].info.near_plane - main.info.near_plane) > 1e-4f) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+
+        // Large jump or rotation between frames: history is not reusable.
+        bool is_camera_cut(const camera_frame& a, const camera_frame& b)
+        {
+            float d2 = 0, dot = 0;
+
+            for (int i = 0; i < 3; ++i) {
+                const float d = a.position[i] - b.position[i];
+                d2 += d * d;
+                dot += a.info.forward[i] * b.info.forward[i];
+            }
+
+            return d2 > 200.0f * 200.0f || dot < 0.94f; // 200 m or ~20 deg in one frame
+        }
+
+
+        const char* resolve(ID3D11Device* device, ID3D11DeviceContext* ctx, const resolve_inputs& in)
+        {
+            if (in.render_w == 0 || in.scene_depth == 0 || in.scene_color == 0) {
+                return "waiting for the scene (G-buffer depth / HDR target)";
+            }
+
+            if (!in.camera.valid || !in.prev_camera.valid) {
+                return "waiting for two frames with a main camera";
+            }
+
+            motion_constants mc = {};
+
+            if (!invert(in.camera.view_proj, mc.inv_view_proj)) {
+                return "main viewProj is not invertible";
+            }
+
+            std::memcpy(mc.prev_view_proj, in.prev_camera.view_proj, sizeof(mc.prev_view_proj));
+
+            for (int i = 0; i < 3; ++i) {
+                mc.camera_delta[i] = in.camera.position[i] - in.prev_camera.position[i];
+            }
+
+            mc.params[0] = in.jitter_x / static_cast<float>(in.render_w);
+            mc.params[1] = in.jitter_y / static_cast<float>(in.render_h);
+            mc.params[2] = in.camera.info.near_plane;
+            mc.params[3] = in.config.mask_distance;
+            mc.render_size[0] = static_cast<float>(in.render_w);
+            mc.render_size[1] = static_cast<float>(in.render_h);
+            mc.render_size[2] = 1.0f / mc.render_size[0];
+            mc.render_size[3] = 1.0f / mc.render_size[1];
+            mc.debug[0] = static_cast<float>(in.config.debug);
+            mc.debug[1] = in.config.debug_motion_pixels;
+            mc.debug[2] = static_cast<float>(in.config.mask_source); // 0 stencil, 1 distance
+            mc.debug[3] = static_cast<float>(in.config.mask_stencil_bits);
+
+            const std::lock_guard<std::mutex> lock(gpu_mutex);
+
+            if (!create_shaders(device)) {
+                return "cannot create shaders";
+            }
+
+            if (!create_targets(in.render_w, in.render_h)) {
+                return "cannot create render targets";
+            }
+
+            if (const char* error = create_depth_view(in.scene_depth)) {
+                return error;
+            }
+
+            if (in.config.taa_enabled) {
+                if (const char* error = create_color_views(in.scene_color)) {
+                    return error;
+                }
+            }
+
+            if (!upload(ctx, gpu.motion_cb.Get(), mc)) {
+                return "cannot update constants";
+            }
+
+            const state_backup backup(ctx);
+            bind_fullscreen(ctx);
+            const float w = mc.render_size[0], h = mc.render_size[1];
+            set_viewport(ctx, w, h);
+
+            // 1. Motion vectors + vehicle mask.
+            bind_srvs(ctx, {});
+            ID3D11RenderTargetView* const motion_targets[] = { gpu.motion.rtv.Get(), gpu.mask.rtv.Get() };
+            ctx->OMSetRenderTargets(2, motion_targets, nullptr);
+            ID3D11Buffer* const motion_cb[] = { gpu.motion_cb.Get() };
+            ctx->PSSetConstantBuffers(0, 1, motion_cb);
+            bind_srvs(ctx, { gpu.depth.srv.Get(), nullptr, nullptr, nullptr, gpu.stencil_srv.Get() });
+            ctx->PSSetShader(gpu.ps_motion.Get(), nullptr, 0);
+            ctx->Draw(3, 0);
+
+            if (!in.config.taa_enabled) {
+                gpu.history_valid = false;
+                return nullptr;
+            }
+
+            // 2. TAA: scene + history -> other history buffer.
+            taa_constants tc = {};
+            std::memcpy(tc.render_size, mc.render_size, sizeof(tc.render_size));
+            tc.jitter[0] = mc.params[0];
+            tc.jitter[1] = mc.params[1];
+            tc.jitter[2] = in.config.taa_unjitter ? 1.0f : 0.0f;
+            tc.jitter[3] = in.config.taa_reconstruction ? 1.0f : 0.0f;
+            tc.blend[0] = in.config.taa_history_weight;
+            tc.blend[1] = in.config.taa_history_weight_motion;
+            tc.blend[2] = (!gpu.history_valid || in.camera_cut) ? 1.0f : 0.0f;
+            tc.blend[3] = in.config.taa_clip_gamma;
+            tc.flicker[0] = in.config.taa_anti_flicker ? 1.0f : 0.0f;
+            tc.flicker[1] = in.config.taa_history_weight_min;
+            tc.flicker[2] = in.config.taa_clip_gamma_static;
+            tc.flicker[3] = in.config.taa_soft_offscreen ? 1.0f : 0.0f;
+            tc.hdr[0] = in.config.taa_hdr_scale;
+
+            if (!upload(ctx, gpu.taa_cb.Get(), tc)) {
+                return "cannot update constants";
+            }
+
+            const target& prev = gpu.history[gpu.history_index];
+            const target& next = gpu.history[1 - gpu.history_index];
+            bind_srvs(ctx, {});
+            ID3D11RenderTargetView* const taa_target[] = { next.rtv.Get() };
+            ctx->OMSetRenderTargets(1, taa_target, nullptr);
+            ID3D11Buffer* const taa_cb[] = { gpu.taa_cb.Get() };
+            ctx->PSSetConstantBuffers(0, 1, taa_cb);
+            bind_srvs(ctx, { gpu.color.srv.Get(), prev.srv.Get(), gpu.motion.srv.Get(), gpu.depth.srv.Get() });
+            ctx->PSSetShader(gpu.ps_taa.Get(), nullptr, 0);
+            ctx->Draw(3, 0);
+
+            // 3. Copy back into the game's scene target.
+            bind_srvs(ctx, {});
+            ID3D11RenderTargetView* const scene_target[] = { gpu.color.rtv.Get() };
+            ctx->OMSetRenderTargets(1, scene_target, nullptr);
+            bind_srvs(ctx, { nullptr, next.srv.Get() });
+            ctx->PSSetShader(gpu.ps_copy.Get(), nullptr, 0);
+            ctx->Draw(3, 0);
+
+            gpu.history_index = 1 - gpu.history_index;
+            gpu.history_valid = true;
+            return nullptr;
+        }
+
+
+        // Debug view over the back buffer at Present (magenta: no data this frame).
+        void draw_debug(ID3D11Device* device, ID3D11DeviceContext* ctx, ID3D11Resource* back_buffer, bool have_data, const settings& config,
+            const object_marker* markers, int marker_count)
+        {
+            ComPtr<ID3D11RenderTargetView> rtv;
+            ComPtr<ID3D11Texture2D> tex;
+
+            if (back_buffer == nullptr || FAILED(back_buffer->QueryInterface(IID_PPV_ARGS(&tex))) ||
+                FAILED(device->CreateRenderTargetView(back_buffer, nullptr, &rtv))) {
+                return;
+            }
+
+            const std::lock_guard<std::mutex> lock(gpu_mutex);
+
+            if (!have_data || !gpu.vs || !gpu.motion.srv || !gpu.depth.srv) {
+                const float magenta[4] = { 0.6f, 0.0f, 0.6f, 1.0f };
+                ctx->ClearRenderTargetView(rtv.Get(), magenta);
+                return;
+            }
+
+            // The motion constants of this frame are still in motion_cb; only the mode may differ.
+            D3D11_TEXTURE2D_DESC desc;
+            tex->GetDesc(&desc);
+
+            if (config.debug == static_cast<int>(debug_view::objects)) {
+                object_constants oc = {};
+                oc.info[0] = static_cast<float>(marker_count);
+                oc.info[1] = static_cast<float>(desc.Width);
+                oc.info[2] = static_cast<float>(desc.Height);
+
+                for (int i = 0; i < marker_count; ++i) {
+                    const object_marker& m = markers[i];
+                    const float a[4] = { m.x, m.y, m.offset_x, m.offset_y };
+                    const float b[4] = { m.error_px, static_cast<float>(m.kind), 0, 0 };
+                    std::memcpy(oc.markers[2 * i], a, sizeof(a));
+                    std::memcpy(oc.markers[2 * i + 1], b, sizeof(b));
+                }
+
+                if (!upload(ctx, gpu.object_cb.Get(), oc)) {
+                    return;
+                }
+            }
+
+            const state_backup backup(ctx);
+            bind_fullscreen(ctx);
+            ID3D11RenderTargetView* const targets[] = { rtv.Get() };
+            ctx->OMSetRenderTargets(1, targets, nullptr);
+            set_viewport(ctx, static_cast<float>(desc.Width), static_cast<float>(desc.Height));
+            ID3D11Buffer* const cb[] = { gpu.motion_cb.Get(), gpu.object_cb.Get() };
+            ctx->PSSetConstantBuffers(0, 2, cb);
+            bind_srvs(ctx, { gpu.depth.srv.Get(), gpu.motion.srv.Get(), gpu.mask.srv.Get(), gpu.history[gpu.history_index].srv.Get(), nullptr, gpu.history[1 - gpu.history_index].srv.Get() });
+            ctx->PSSetShader(gpu.ps_debug.Get(), nullptr, 0);
+            ctx->Draw(3, 0);
+        }
+
+
+        void on_present(command_queue* queue, swapchain* swapchain, const rect*, const rect*, uint32_t, const rect*)
+        {
+            addon_state& s = state();
+            const resource back_buffer = swapchain->get_current_back_buffer();
+            const resource_desc bb_desc = queue->get_device()->get_resource_desc(back_buffer);
+
+            bool resolved;
+            settings config;
+            object_marker markers[addon_state::max_markers];
+            int marker_count;
+            {
+                const std::lock_guard<std::recursive_mutex> lock(s.mutex);
+                s.back_buffer_w = bb_desc.texture.width;
+                s.back_buffer_h = bb_desc.texture.height;
+                resolved = s.resolved_this_frame;
+
+                if (!resolved && s.render_w != 0) {
+                    s.motion_status = s.map_mode ? "map on screen: TAA paused" : "resolve point not reached this frame";
+                }
+
+                s.resolved_this_frame = false;
+                config = s.config;
+                finish_camera_frame(s);
+                analyse_objects(s);
+                marker_count = s.marker_count;
+                std::copy(s.markers, s.markers + marker_count, markers);
+                advance_frame(s);
+            }
+
+            if (config.debug != static_cast<int>(debug_view::off)) {
+                auto* const device = reinterpret_cast<ID3D11Device*>(queue->get_device()->get_native());
+                auto* const ctx = reinterpret_cast<ID3D11DeviceContext*>(queue->get_immediate_command_list()->get_native());
+                try {
+                    draw_debug(device, ctx, reinterpret_cast<ID3D11Resource*>(back_buffer.handle), resolved, config, markers, marker_count);
+                }
+                catch (...) {
+                }
+            }
+
+            capture_on_present(queue, swapchain);
+        }
+
+
+        // Can run inside our own D3D11 calls (see gpu_mutex): no gpu_mutex here.
+        void on_destroy_resource(device*, resource resource)
+        {
+            // Game textures our views keep alive are only destroyed when we
+            // release the views ourselves: nothing to do then.
+            if (watched_depth.load() == resource.handle || watched_color.load() == resource.handle) {
+                return;
+            }
+
+            addon_state& s = state();
+            const std::lock_guard<std::recursive_mutex> lock(s.mutex);
+
+            if (s.scene_depth == resource.handle || s.scene_color == resource.handle) {
+                // Destroyed before we used it: detect the scene again.
+                s.scene_depth = s.scene_color = 0;
+                s.render_w = s.render_h = 0;
+            }
+
+            if (s.depth_candidate == resource.handle || s.color_candidate == resource.handle) {
+                s.depth_candidate = s.color_candidate = 0;
+                s.candidate_w = s.candidate_h = 0;
+            }
+        }
+
+
+        void on_destroy_device(device*)
+        {
+            const std::lock_guard<std::mutex> lock(gpu_mutex);
+            watched_depth = 0;
+            watched_color = 0;
+            gpu = {};
+        }
+    }
+
+
+    void run_resolve(command_list* cmd_list)
+    {
+        addon_state& s = state();
+        resolve_inputs in;
+        {
+            const std::lock_guard<std::recursive_mutex> lock(s.mutex);
+
+            if (s.resolved_this_frame) {
+                return;
+            }
+
+            s.resolved_this_frame = true;
+
+            if (s.dumping) {
+                reshade::log::message(reshade::log::level::info, "EDAA trace: ===== TAA RESOLVE HERE =====");
+            }
+
+            in.camera = current_main_camera(s);
+            in.prev_camera = s.camera; // main camera of the previous frame
+            in.camera_cut = in.camera.valid && in.prev_camera.valid && is_camera_cut(in.camera, in.prev_camera);
+
+            if (s.history_reset) {
+                in.camera_cut = true;
+                s.history_reset = false;
+            }
+
+            s.on_foot = in.camera.valid && first_person_body_drawn(s, in.camera);
+
+            if (s.config.jitter_enabled) {
+                in.jitter_x = s.jitter_x;
+                in.jitter_y = s.jitter_y;
+            }
+
+            in.render_w = s.render_w;
+            in.render_h = s.render_h;
+            in.scene_depth = s.scene_depth;
+            in.scene_color = s.scene_color;
+            in.config = s.config;
+
+            if (s.on_foot && s.config.mask_auto_off_on_foot && s.config.mask_source == 1) {
+                in.config.mask_distance = 0.0f; // no vehicle: everything uses camera motion
+            }
+        }
+
+        const char* error = "disabled";
+
+        if (in.config.motion_enabled || in.config.taa_enabled) {
+            auto* const device = reinterpret_cast<ID3D11Device*>(cmd_list->get_device()->get_native());
+            auto* const ctx = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());
+            // Never let an exception reach the game.
+            try {
+                error = resolve(device, ctx, in);
+            }
+            catch (...) {
+                error = "internal error (exception)";
+            }
+        }
+
+        const std::lock_guard<std::recursive_mutex> lock(s.mutex);
+        s.motion_ok = error == nullptr;
+        s.motion_status = error != nullptr ? error : (in.config.taa_enabled ? (in.camera_cut ? "ok (history reset: camera cut)" : "ok") : "ok (motion vectors only)");
+    }
+
+
+    void register_pass_events()
+    {
+        reshade::register_event<reshade::addon_event::present>(on_present);
+        reshade::register_event<reshade::addon_event::destroy_resource>(on_destroy_resource);
+        reshade::register_event<reshade::addon_event::destroy_device>(on_destroy_device);
+    }
+
+
+    void unregister_pass_events()
+    {
+        reshade::unregister_event<reshade::addon_event::present>(on_present);
+        reshade::unregister_event<reshade::addon_event::destroy_resource>(on_destroy_resource);
+        reshade::unregister_event<reshade::addon_event::destroy_device>(on_destroy_device);
+        const std::lock_guard<std::mutex> lock(gpu_mutex);
+        watched_depth = 0;
+        watched_color = 0;
+        gpu = {};
+    }
 }

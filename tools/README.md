@@ -34,6 +34,14 @@ Errors are written to `<Out>\log.txt`.
 | `check_motion.py <prev dump> <cur dump> <prev t33.bin> <cur t33.bin>` | Validate the motion vector math against static objects of a 2-frame capture (ground truth vs shader formula) |
 | `minidump_info.py <crash.dmp> [module ...]` | Exception, faulting address and raw stack scan of a crash dump (no debugger needed); resolve EDAA offsets with a `/MAP` build |
 
+## Code style
+
+`format.py`: formats `addon/src` with clang-format (`.clang-format` at the repo
+root: braces on the same line for control statements, on a new line for
+functions and types, 4 spaces) plus the blank-line rules clang-format lacks
+(one empty line around if/for/while/switch blocks, two between functions).
+Run `python tools/format.py` before committing; it is idempotent.
+
 ## Packaging
 
 `package.ps1`: Release build, then `dist\EDAA-<date>\` (`EDAA.addon64`, `INSTALL.txt`) and `dist\EDAA-<date>.zip`.

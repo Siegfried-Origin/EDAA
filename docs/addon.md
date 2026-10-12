@@ -120,7 +120,7 @@ defaults" restores the values below. The debug view always starts off.
 | History weight in motion | 0.9 | cap for fast motion (lower: less ghosting) |
 | Clip box in motion / when still | 1.25 / 5.0 | variance clip in standard deviations (lower: less ghosting, more flicker) |
 | Anti-flicker, min history weight | on, 0.95 | history weight when current and history disagree (at 0.95, above the history weight, it has no effect: chosen in game as the least flickering) |
-| HDR compression scale | 50 | scene values (before the game's exposure) are multiplied by it before the c/(1+c) compression used for filtering and blending; higher = bright thin edges make their dark neighbours ripple less with the jitter. At 1 high-contrast edges in stations flickered; 50 fixes them; near 1000 highlights look wrong |
+| HDR compression scale | 30 | scene values (before the game's exposure) are multiplied by it before the c/(1+c) compression used for filtering and blending; higher = bright thin edges make their dark neighbours ripple less with the jitter. At 1 high-contrast edges in stations flickered; 30-50 fixes them; near 1000 highlights look wrong |
 | Soft screen edges | on | pixels entering the screen reuse the edge of the history |
 | Reconstruction filter | off | current sample = Gaussian 3x3 around the unjittered pixel centre; meant to make thin highlights fade instead of flicker, but in game it softens the image without a visible gain |
 | Unjitter current sample | off | softer image (when the filter is off) |
@@ -137,9 +137,9 @@ defaults" restores the values below. The debug view always starts off.
   statistics) to `<capture folder>/<date_time>/`,
   and traces that frame into `ReShade.log`. Keep doing the same thing
   (still, or turning steadily) during the capture.
-* **Frame trace** ("Dump/trace next frame"): one frame of the render target
-  bindings and draws that touch the scene depth or HDR target (up to 20000
-  lines) in `ReShade.log`, with pixel shader hash, depth test and compare
+* **Frame trace** ("Dump/trace next frame"): one frame of all render target
+  bindings and of the draws that touch the scene depth or HDR target (up to
+  20000 lines) in `ReShade.log`, with pixel shader hash, depth test and compare
   function (`zfunc`: -1 off, 1 less, 2 equal, 3 less_equal, 4 greater,
   5 not_equal, 6 greater_equal, 7 always), depth write, blending, full
   viewport, jitter and the position of the TAA resolve. It is how the HUD

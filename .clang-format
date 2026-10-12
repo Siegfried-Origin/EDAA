@@ -1,0 +1,62 @@
+# C++ style of the project (same as Siegfried Origin's other projects):
+# braces on the same line for control statements, on a new line for
+# functions, types and namespaces; 4 spaces; else on its own line.
+# Blank lines around blocks and two blank lines between functions are
+# applied by tools/format.py, which runs clang-format first.
+Language: Cpp
+ColumnLimit: 0
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ContinuationIndentWidth: 4
+AccessModifierOffset: -4
+NamespaceIndentation: All
+IndentCaseLabels: true
+IndentCaseBlocks: true
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterCaseLabel: false
+  AfterClass: true
+  AfterControlStatement: Never
+  AfterEnum: true
+  AfterFunction: true
+  AfterNamespace: true
+  AfterStruct: true
+  AfterUnion: true
+  AfterExternBlock: true
+  BeforeCatch: true
+  BeforeElse: true
+  BeforeLambdaBody: false
+  BeforeWhile: false
+  IndentBraces: false
+  SplitEmptyFunction: false
+  SplitEmptyRecord: false
+  SplitEmptyNamespace: false
+InsertBraces: true
+PointerAlignment: Left
+ReferenceAlignment: Left
+AlignAfterOpenBracket: DontAlign
+AlignOperands: DontAlign
+AlignTrailingComments:
+  Kind: Leave
+AlignConsecutiveAssignments: None
+AlignConsecutiveDeclarations: None
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortEnumsOnASingleLine: false
+AllowShortLambdasOnASingleLine: All
+BreakConstructorInitializers: BeforeColon
+ConstructorInitializerIndentWidth: 4
+Cpp11BracedListStyle: false
+SpaceAfterTemplateKeyword: false
+SortIncludes: Never
+IncludeBlocks: Preserve
+MaxEmptyLinesToKeep: 2
+KeepEmptyLines:
+  AtStartOfBlock: false
+  AtEndOfFile: false
+FixNamespaceComments: false
+ReflowComments: false
