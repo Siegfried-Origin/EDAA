@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EDAA | Temporal Anti-Aliasing for Elite Dangerous</title>
+    <meta name="description" content="EDAA adds a modern temporal anti-aliasing (TAA) to Elite Dangerous Odyssey through ReShade.">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&family=JetBrains+Mono&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0b0b0c;
+            color: #d4d4d8;
+        }
+        .code-font { font-family: 'JetBrains Mono', monospace; }
+        /* Panels: flat anthracite with a thin border. */
+        .glass {
+            background: #151618;
+            border: 1px solid #2a2b2f;
+        }
+        .text-gradient { color: #ff7100; }
+        .bg-space {
+            background-image: linear-gradient(180deg, #18191c 0%, #0b0b0c 520px);
+        }
+        .btn-primary {
+            background-color: #c85a00;
+            transition: background-color 0.2s ease;
+        }
+        .btn-primary:hover { background-color: #e06600; }
+    </style>
+</head>
+<body class="bg-space min-h-screen">
+    <!-- Navigation -->
+    <nav class="flex justify-between items-center p-6 max-w-6xl mx-auto">
+        <div class="text-xl font-bold tracking-tighter">
+            ED<span class="text-[#ff7100]">AA</span>
+        </div>
+        <div class="flex gap-6 text-sm font-medium">
+            <a href="https://github.com/Siegfried-Origin/EDAA" class="hover:text-sky-400 transition">GitHub</a>
+            <a href="#install" class="hover:text-[#ff7100] transition">Installation</a>
+            <a href="https://siegfried-origin.github.io" class="hover:text-[#ff7100] transition">More Tools</a>
+        </div>
+    </nav>
+
+    <!-- Hero -->
+    <header class="max-w-4xl mx-auto text-center py-20 px-6">
+        <h1 class="text-4xl md:text-6xl font-bold mb-6 tracking-tight">
+            Elite Dangerous <span class="text-gradient">Anti-Aliasing</span>
+        </h1>
+        <p class="text-lg md:text-xl text-slate-400 mb-10 leading-relaxed max-w-2xl mx-auto">
+            Temporal Anti-Aliasing (TAA) for <span class="text-[#ff7100]">Elite Dangerous Odyssey</span>,
+            as a ReShade add-on.
+        </p>
+        <div class="flex flex-col sm:flex-row justify-center gap-4">
+            <a id="download" href="https://github.com/Siegfried-Origin/EDAA/releases"
+               class="btn-primary text-white px-8 py-4 rounded-sm font-bold flex items-center justify-center gap-2">
+                <i class="fa-solid fa-download"></i> <span id="download-label">Download Latest Release</span>
+            </a>
+            <a href="https://github.com/Siegfried-Origin/EDAA"
+               class="glass hover:bg-white/10 text-white px-8 py-4 rounded-sm font-bold transition flex items-center justify-center gap-2">
+                <i class="fa-brands fa-github"></i> View Source
+            </a>
+        </div>
+        <p id="release-info" class="text-sm text-slate-500 mt-4"></p>
+    </header>
+
+    <!-- Video 
+    <section class="max-w-4xl mx-auto px-6 pb-20">
+        <div class="glass p-3 md:p-6 rounded-sm overflow-hidden">
+            <div class="aspect-video w-full rounded-sm overflow-hidden">
+                <iframe
+                    class="w-full h-full"
+                    src="https://www.youtube.com/embed/92i7DqSiuNI"
+                    title="EDAA Presentation"
+                    frameborder="0"
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                    allowfullscreen>
+                </iframe>
+            </div>
+        </div>
+    </section>
+    -->
+
+    <!-- Features -->
+    <section class="max-w-6xl mx-auto px-6 py-20 grid md:grid-cols-3 gap-8">
+        <div class="glass p-8 rounded-sm transition group border-b-4 border-b-transparent hover:border-b-[#ff7100]">
+            <div class="w-12 h-12 bg-[#ff7100]/20 text-[#ffb000] rounded-sm flex items-center justify-center mb-6 group-hover:bg-[#ff7100] group-hover:text-white transition">
+                <i class="fa-solid fa-wand-magic-sparkles text-xl"></i>
+            </div>
+            <h3 class="text-xl font-bold mb-3">TAA</h3>
+            <p class="text-slate-400 leading-relaxed">Sub-pixel jitter and motion vectors rebuilt from the game's own camera and depth: stable edges, no ghosting when you turn, fly, drive or walk.</p>
+        </div>
+
+        <div class="glass p-8 rounded-sm transition group border-b-4 border-b-transparent hover:border-b-[#ff7100]">
+            <div class="w-12 h-12 bg-[#ff7100]/20 text-[#ffb000] rounded-sm flex items-center justify-center mb-6 group-hover:bg-[#ff7100] group-hover:text-white transition">
+                <i class="fa-solid fa-crosshairs text-xl"></i>
+            </div>
+            <h3 class="text-xl font-bold mb-3">Crisp Cockpit HUD</h3>
+            <p class="text-slate-400 leading-relaxed">The TAA runs inside the game's frame, before the HUD, bloom and tonemapping. Your HUD stays sharp, maps and high-res screenshots are left untouched.</p>
+        </div>
+
+        <div class="glass p-8 rounded-sm transition group border-b-4 border-b-transparent hover:border-b-[#ff7100]">
+            <div class="w-12 h-12 bg-[#ff7100]/20 text-[#ffb000] rounded-sm flex items-center justify-center mb-6 group-hover:bg-[#ff7100] group-hover:text-white transition">
+                <i class="fa-solid fa-plug text-xl"></i>
+            </div>
+            <h3 class="text-xl font-bold mb-3">One-Click Setup</h3>
+            <p class="text-slate-400 leading-relaxed">The installer finds the game (Steam, Epic, Frontier) and sets up ReShade if needed. Works alongside <span class="text-[#ffb000] font-semibold">EDHM</span>.</p>
+        </div>
+    </section>
+
+    <!-- Installation -->
+    <section id="install" class="max-w-4xl mx-auto px-6 py-20">
+        <div class="text-center mb-16">
+            <h2 class="text-3xl md:text-4xl font-bold mb-4">Quick Start Guide</h2>
+            <div class="h-px w-20 bg-[#ff7100] mx-auto"></div>
+        </div>
+
+        <div class="grid md:grid-cols-2 gap-12 items-center">
+            <div class="space-y-8">
+                <div class="flex gap-4">
+                    <div class="flex-shrink-0 w-8 h-8 rounded-sm bg-[#ff7100] text-white flex items-center justify-center font-bold">1</div>
+                    <div>
+                        <h4 class="font-bold text-lg">Download &amp; Install</h4>
+                        <p class="text-slate-400">
+                            Run <span class="code-font text-sm text-white">EDAA-Setup-x.y.z.exe</span> from the
+                            <a href="https://github.com/Siegfried-Origin/EDAA/releases" class="text-[#ffb000] transition">latest release</a>.
+                            It installs ReShade 6.8 with full add-on support if it is missing.
+                        </p>
+                    </div>
+                </div>
+                <div class="flex gap-4">
+                    <div class="flex-shrink-0 w-8 h-8 rounded-sm bg-[#ff7100] text-white flex items-center justify-center font-bold">2</div>
+                    <div>
+                        <h4 class="font-bold text-lg">Turn the Game's AA Off</h4>
+                        <p class="text-slate-400">In Options &gt; Graphics, set anti-aliasing to <span class="text-white font-semibold">Off</span>: EDAA replaces it.</p>
+                    </div>
+                </div>
+                <div class="flex gap-4">
+                    <div class="flex-shrink-0 w-8 h-8 rounded-sm bg-[#ff7100] text-white flex items-center justify-center font-bold">3</div>
+                    <div>
+                        <h4 class="font-bold text-lg">Fly</h4>
+                        <p class="text-slate-400">
+                            TAA is on by default. <kbd class="code-font px-2 py-1 bg-slate-800 rounded border border-slate-600 text-[#ffb000] text-sm">Ctrl+Shift+T</kbd>
+                            toggles it, <kbd class="code-font px-2 py-1 bg-slate-800 rounded border border-slate-600 text-[#ffb000] text-sm">Home</kbd>
+                            opens the ReShade overlay (tab "EDAA") for status and settings.
+                        </p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="glass p-6 rounded-sm border-l-4 border-l-[#ff7100]">
+                <h4 class="text-lg font-bold mb-4 flex items-center gap-2">
+                    <i class="fa-solid fa-circle-info text-[#ffb000]"></i> Good to know
+                </h4>
+                <ul class="text-slate-400 leading-relaxed space-y-3 list-disc pl-5">
+                    <li>Requires Elite Dangerous Odyssey (DirectX 11) and ReShade 6.8+ <span class="text-white">with full add-on support</span>.</li>
+                    <li>Settings are saved in <span class="code-font text-sm">ReShade.ini</span>; "Reset to defaults" restores them.</li>
+                    <li>ReShade's add-on build is meant for single-player games. Elite Dangerous has no anti-cheat blocking it, but use it at your own discretion.</li>
+                    <li>Uninstall from Windows Settings &gt; Apps &gt; EDAA (ReShade stays).</li>
+                </ul>
+            </div>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="max-w-6xl mx-auto px-6 py-12 border-t border-white/5 text-center text-slate-500 text-sm">
+        <p class="italic mb-3">Fly safe, fly smooth - CMDR Siegfried Origin</p>
+        <p>&copy; <script>document.write(new Date().getFullYear())</script> EDAA. Not affiliated with Frontier Developments.</p>
+        <div class="flex justify-center gap-4 mt-4">
+            <a href="https://github.com/Siegfried-Origin/EDAA" class="hover:text-[#ffb000] transition">GitHub</a>
+            <a href="https://github.com/Siegfried-Origin/EDAA/issues" class="hover:text-[#ffb000] transition">Report an issue</a>
+        </div>
+    </footer>
+
+    <!-- Point the download button straight at the latest installer (falls back to the releases page). -->
+    <script>
+        fetch("https://api.github.com/repos/Siegfried-Origin/EDAA/releases?per_page=1")
+            .then(response => response.ok ? response.json() : [])
+            .then(releases => {
+                const release = releases[0];
+                if (!release) {
+                    return;
+                }
+                const setup = release.assets.find(asset => /^EDAA-Setup-.*\.exe$/.test(asset.name));
+                if (setup) {
+                    document.getElementById("download").href = setup.browser_download_url;
+                }
+                const version = release.tag_name.replace(/^v/, "");
+                document.getElementById("download-label").textContent = "Download EDAA " + version;
+                document.getElementById("release-info").textContent =
+                    "Released " + new Date(release.published_at).toLocaleDateString() +
+                    (release.prerelease ? " (preview)" : "") + " - Windows installer";
+            })
+            .catch(() => {});
+    </script>
+</body>
+</html>

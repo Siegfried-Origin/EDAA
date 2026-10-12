@@ -5,6 +5,7 @@ Odyssey (DX11): sub-pixel jitter, motion vectors from the game's camera and
 depth, and a TAA resolve inserted into the game's frame before the cockpit
 HUD, bloom and tonemapping.
 
+* Website and download: https://siegfried-origin.github.io/EDAA/ (`docs/index.html`, GitHub Pages)
 * How it works, settings, diagnostics: [docs/addon.md](docs/addon.md)
 * The game's rendering, reverse-engineered: [docs/reverse-engineering.md](docs/reverse-engineering.md)
 * Finding camera matrices in any DX11 game: [docs/finding-camera-matrices.md](docs/finding-camera-matrices.md)
