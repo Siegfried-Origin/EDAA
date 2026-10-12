@@ -36,7 +36,7 @@ Errors are written to `<Out>\log.txt`.
 
 ## Code style
 
-`format.py`: formats `addon/src` with clang-format (`.clang-format` at the repo
+`format.py`: formats `addon/src` and `addon/shaders` (HLSL, as C++) with clang-format (`.clang-format` at the repo
 root: braces on the same line for control statements, on a new line for
 functions and types, 4 spaces) plus the blank-line rules clang-format lacks
 (one empty line around if/for/while/switch blocks, two between functions).

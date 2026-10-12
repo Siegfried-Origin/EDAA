@@ -5,7 +5,8 @@ root), then the blank-line rules clang-format cannot express:
     (not at the start or end of a scope, not between "}" and "else");
   * two empty lines between function definitions.
 
-Usage: python tools/format.py [files...]   (default: addon/src/*.cpp, *.hpp)
+Usage: python tools/format.py [files...]
+(default: addon/src/*.cpp, *.hpp and addon/shaders/*.hlsl, formatted as C++)
 clang-format is looked up in PATH, then in the Visual Studio LLVM folder.
 """
 
@@ -18,7 +19,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONTROL = re.compile(r"^(if|for|while|switch|do)\b")
-TYPE_KEYWORDS = re.compile(r"^(struct|class|enum|union|namespace)\b")
+TYPE_KEYWORDS = re.compile(r"^(struct|class|enum|union|namespace|cbuffer)\b")
 OPENING_DIRECTIVE = re.compile(r"^#\s*(if|ifdef|ifndef|else|elif)\b")
 CLOSING_DIRECTIVE = re.compile(r"^#\s*(endif|else|elif)\b")
 
@@ -170,7 +171,8 @@ def apply_blank_rules(text):
 
 def main():
     files = sys.argv[1:] or sorted(glob.glob(os.path.join(ROOT, "addon", "src", "*.cpp")) +
-                                   glob.glob(os.path.join(ROOT, "addon", "src", "*.hpp")))
+                                   glob.glob(os.path.join(ROOT, "addon", "src", "*.hpp")) +
+                                   glob.glob(os.path.join(ROOT, "addon", "shaders", "*.hlsl")))
     subprocess.run([find_clang_format(), "-i", "--style=file"] + files, check=True, cwd=ROOT)
     for path in files:
         with open(path, "r", encoding="utf-8", newline="") as f:
