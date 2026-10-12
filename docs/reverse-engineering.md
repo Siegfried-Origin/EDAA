@@ -416,3 +416,29 @@ Signatures, checked against all 12 captures:
 
 The galaxy map was not captured; it probably matches the heuristic (no sun
 shadows, little geometry) but its shaders are unknown.
+
+## 9. High-resolution screenshot (Alt+F10)
+
+Captures `highres-frame21611/21612/21613` (three consecutive frames while
+the game saves an Alt+F10 screenshot). The game renders the big image as
+tiles, one per frame, through the normal pipeline at the normal render size
+(2560x1440 G-buffer). Only the camera changes: the main viewProj
+(`c270-c273`) becomes a zoomed, **off-centre** projection.
+
+With `f` = the w column (forward), the off-centre terms are the x and y
+columns projected on `f` (`dot(col_x, f)`, `dot(col_y, f)`); the remaining
+lengths are the zoomed scales:
+
+| Frame | off-centre x, y | sx, sy (normal: 1.0, 1.78) |
+|---|---|---|
+| 21611 | 2, 1 | 4.0, 7.1 |
+| 21612 | 0, 1 | 4.0, 7.1 |
+| 21613 | 0, 1 | 4.0, 7.1 |
+
+The same terms are 0 for every view with a near plane >= 2 cm in all the
+other captures (the game has no projection jitter); only small offscreen
+views with near 0.01 (probes, target hologram) are off-centre in normal
+frames. The add-on uses this to pause jitter and TAA from the first tile
+on (`camera_tracker.cpp`, see addon.md); otherwise the history blends the
+tiles together and the jitter shifts them. Tool: off-centre terms are easy
+to list from a `rd_dump_frame.py` dump (`check_layout.py` prints the views).

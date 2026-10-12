@@ -739,7 +739,8 @@ namespace edaa
                 resolved = s.resolved_this_frame;
 
                 if (!resolved && s.render_w != 0) {
-                    s.motion_status = s.map_mode ? "map on screen: TAA paused" : "resolve point not reached this frame";
+                    s.motion_status = s.screenshot_mode ? "high-resolution screenshot: TAA paused" : s.map_mode ? "map on screen: TAA paused"
+                                                                                                                : "resolve point not reached this frame";
                 }
 
                 s.resolved_this_frame = false;

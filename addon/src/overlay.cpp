@@ -39,6 +39,10 @@ namespace edaa
                 ImGui::Text("Map on screen: TAA paused (%s)", s.map_reason);
             }
 
+            if (s.screenshot_mode) {
+                ImGui::TextUnformatted("High-resolution screenshot: TAA paused");
+            }
+
             if (ImGui::Button("Reset to defaults")) {
                 s.config = settings{};
                 edit.changed = true;

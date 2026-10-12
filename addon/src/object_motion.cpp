@@ -406,7 +406,7 @@ namespace edaa
         }
         const double start = now_ms();
 
-        if (!cur.empty() && !prev.empty() && s.camera.valid && s.prev_camera.valid && !s.map_mode) {
+        if (!cur.empty() && !prev.empty() && s.camera.valid && s.prev_camera.valid && !s.map_mode && !s.screenshot_mode) {
             match(s, cur, prev);
         }
 

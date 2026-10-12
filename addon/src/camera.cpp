@@ -78,6 +78,12 @@ namespace edaa
             return info;
         }
 
+        for (int i = 0; i < 3; ++i) {
+            const float* row = r(regs, reg::view_proj + i);
+            info.off_center[0] += row[0] * info.forward[i];
+            info.off_center[1] += row[1] * info.forward[i];
+        }
+
         info.vfov_deg = 2.0f * std::atan(1.0f / info.sy) * 57.2957795f;
         info.aspect = info.sy / info.sx;
         info.kind = view_kind::perspective;

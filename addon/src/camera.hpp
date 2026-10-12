@@ -45,6 +45,10 @@ namespace edaa
         float near_plane = 0; // c273.z
         float vfov_deg = 0, aspect = 0;
         float forward[3] = {}; // w column = camera forward
+        // Off-centre projection terms: x/y columns along the forward axis. Zero
+        // in game (the jitter goes through the viewport); non-zero for the tiles
+        // of a high-resolution screenshot (Alt+F10) and some small views.
+        float off_center[2] = {};
 
         float camera_pos[3] = {}; // c275
     };

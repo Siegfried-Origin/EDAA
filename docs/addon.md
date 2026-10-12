@@ -170,6 +170,11 @@ defaults" restores the values below. The debug view always starts off.
   with jitter when it opens). The galaxy map is not flagged as a map but
   is not affected either: it has no G-buffer scene with a main camera, so
   the TAA does not run there (checked in game, no ghosting).
+* High-resolution screenshots (Alt+F10): the game renders them as zoomed,
+  off-centre tiles. A camera update with an off-centre projection (near
+  plane >= 2 cm) pauses jitter and TAA from that frame on, until 30 frames
+  after the last tile; the history is then reset. Overlay and log say
+  "high-resolution screenshot". See reverse-engineering.md section 9.
 * Shader hashes are those of game build `2026.09.03.332841`; a game update
   may change them (the structural markers keep working, the log says which
   shaders were found).

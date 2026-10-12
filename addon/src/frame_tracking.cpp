@@ -455,7 +455,7 @@ namespace edaa
                     ctx->game_viewport.width == static_cast<float>(s.render_w) &&
                     ctx->game_viewport.height == static_cast<float>(s.render_h);
                 // Nothing drawn after the TAA resolve is accumulated: do not jitter it.
-                want = (scene_draw || overlay_draw) && s.config.jitter_enabled && !s.resolved_this_frame && !s.map_mode;
+                want = (scene_draw || overlay_draw) && s.config.jitter_enabled && !s.resolved_this_frame && !s.map_mode && !s.screenshot_mode;
                 jx = s.jitter_x;
                 jy = s.jitter_y;
 
@@ -529,7 +529,7 @@ namespace edaa
                 }
 
                 // Maps (system, galaxy): no TAA, no jitter.
-                if (s.resolved_this_frame || s.render_w == 0 || s.map_mode) {
+                if (s.resolved_this_frame || s.render_w == 0 || s.map_mode || s.screenshot_mode) {
                     return;
                 }
 
@@ -627,6 +627,12 @@ namespace edaa
         }
 
         s.map_reason = !map ? "no" : (s.current.map_shader_drawn ? "yes (system map shaders)" : "yes (no sun shadow pass)");
+
+        if (s.screenshot_mode && --s.screenshot_hold <= 0) {
+            s.screenshot_mode = false;
+            s.history_reset = true;
+            reshade::log::message(reshade::log::level::info, "EDAA: high-resolution screenshot done, TAA resumed");
+        }
 
         if (s.depth_candidate != 0) {
             use_depth_candidate(s);

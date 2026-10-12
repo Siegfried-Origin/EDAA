@@ -92,6 +92,20 @@ namespace edaa
                 return;
             }
 
+            // High-resolution screenshot (Alt+F10): the game renders the image as
+            // zoomed, off-centre tiles, one per frame. Pause jitter and TAA from
+            // this very frame on (the update comes before the scene draws), and
+            // for a while after the last tile. Views with a near plane below 2 cm
+            // (small offscreen views) are off-centre in normal frames too.
+            if (info.near_plane >= 0.02f && (std::fabs(info.off_center[0]) > 0.01f || std::fabs(info.off_center[1]) > 0.01f)) {
+                if (!s.screenshot_mode) {
+                    reshade::log::message(reshade::log::level::info, "EDAA: high-resolution screenshot, TAA paused");
+                }
+
+                s.screenshot_mode = true;
+                s.screenshot_hold = 30;
+            }
+
             if (s.current.update_count < frame_stats::max_updates) {
                 s.current.updates[s.current.update_count++] = update;
             }

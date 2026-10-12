@@ -166,6 +166,8 @@ namespace edaa
         const char* resolve_point = "none"; // which one, for the overlay
         bool exposure_seen = false; // exposure downsample of the HDR scene drawn this frame
         bool map_mode = false; // system/galaxy map on screen (decided from the previous frame)
+        bool screenshot_mode = false; // high-resolution screenshot tiles being rendered (camera_tracker.cpp)
+        int screenshot_hold = 0; // frames left before leaving screenshot mode
         const char* map_reason = "no";
         bool history_reset = false; // drop the TAA history at the next resolve
         bool motion_ok = false; // motion vectors generated last frame
