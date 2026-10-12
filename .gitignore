@@ -6,3 +6,4 @@ dist/
 *.dmp
 __pycache__/
 installer/Output/
+build.bat
