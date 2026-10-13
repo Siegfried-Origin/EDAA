@@ -30,10 +30,18 @@ namespace edaa
         xess = 2, // Intel XeSS Native AA through a D3D12 bridge (xess.cpp); falls back to TAA if unavailable
     };
 
+    // What replaces the game's final upscale when it renders below the display size.
+    enum class upscaler : int
+    {
+        game = 0, // the game's own (bilinear or FSR), after the anti-aliasing above
+        dlss = 1, // NVIDIA DLSS on the tonemapped image (passes.cpp run_upscale)
+    };
+
 
     struct settings
     {
         int aa_method = 0; // aa_method
+        int upscaling = 0; // upscaler
         bool upscaler_jitter_flip = false; // developer: negate the jitter passed to DLSS/XeSS (sign convention check)
         bool jitter_enabled = true; // follows taa_enabled unless changed in developer builds
         int jitter_phases = 8; // Halton(2,3) sequence length
@@ -155,7 +163,8 @@ namespace edaa
         // targets (G-buffer pass). Its size is the scene render size.
         uint64_t scene_depth = 0;
         uint32_t render_w = 0, render_h = 0;
-        uint32_t back_buffer_w = 0, back_buffer_h = 0; // swap chain size, from Present
+        uint32_t back_buffer_w = 0, back_buffer_h = 0; // swap chain size, from Present (display size)
+        int jitter_phases = 8; // Halton phases in use: the setting x (display / render)^2 when upscaling
         uint64_t scene_color = 0; // HDR scene target (G-buffer RT3, R11G11B10), resolved by TAA
         uint64_t depth_candidate = 0; // largest such depth buffer in the frame in progress
         uint64_t color_candidate = 0; // its HDR target
@@ -183,7 +192,15 @@ namespace edaa
         int screenshot_hold = 0; // frames left before leaving screenshot mode
         const char* map_reason = "no";
         bool history_reset = false; // drop the TAA history at the next resolve
+        bool upscale_pending = false; // the resolve ran for upscaling: replace the game's upscale draw
+        bool upscale_attempted = false; // first draw into a display-size target after the resolve seen
+        uint64_t ldr_image = 0; // last render-size R8G8B8A8 target drawn after the resolve (tonemap / SMAA output)
+        const char* upscale_status = "off";
         bool motion_ok = false; // motion vectors generated last frame
+        // Last frame's resolve ran (TAA, DLSS/XeSS or upscaling motion pass): jitter
+        // only then. Screens it cannot handle (galaxy map: no main camera) would
+        // otherwise show the raw jitter.
+        bool jitter_allowed = false;
         const char* motion_status = "not started";
 
         bool capture_requested = false; // Ctrl+Shift+C / overlay button
@@ -238,6 +255,11 @@ namespace edaa
 
     // Runs the motion vector and TAA passes, right before the game's bloom (state not locked).
     void run_resolve(reshade::api::command_list* cmd_list);
+
+    // At the first draw into a display-size target after the resolve, when
+    // upscale_pending: runs the upscaler instead of the game's upscale draw.
+    // Returns true when the draw must be skipped (state not locked).
+    bool run_upscale(reshade::api::command_list* cmd_list);
 
     // Auto capture state machine, at Present (state not locked).
     void capture_on_present(reshade::api::command_queue* queue, reshade::api::swapchain* swapchain);

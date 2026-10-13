@@ -30,6 +30,86 @@ namespace edaa
         };
 
 
+        // Upscaling choice, the render and display sizes and the modes the upscaler offers.
+        void draw_upscaling(addon_state& s, change_tracker& edit)
+        {
+            ImGui::Separator();
+            const int dlss_available = dlss::availability();
+            const bool dlss_usable = dlss_available == 1 || EDAA_DEVELOPER;
+            const char* dlss_label = dlss_available == 1 ? "NVIDIA DLSS"
+                : dlss_available == 0                    ? "NVIDIA DLSS - not available on this system"
+                                                         : "NVIDIA DLSS - checking...";
+            const bool dlss_selected = s.config.upscaling == static_cast<int>(upscaler::dlss) && dlss_usable;
+
+            if (ImGui::BeginCombo("Upscaling", dlss_selected ? "NVIDIA DLSS" : "Game (bilinear or FSR)")) {
+                if (ImGui::Selectable("Game (bilinear or FSR)", !dlss_selected) && dlss_selected) {
+                    s.config.upscaling = static_cast<int>(upscaler::game);
+                    s.history_reset = true;
+                    edit.changed = true;
+                }
+
+                if (ImGui::Selectable(dlss_label, dlss_selected, dlss_usable ? 0 : ImGuiSelectableFlags_Disabled) && !dlss_selected) {
+                    s.config.upscaling = static_cast<int>(upscaler::dlss);
+                    s.history_reset = true;
+                    edit.changed = true;
+                }
+
+                ImGui::EndCombo();
+            }
+
+            const uint32_t render_w = s.render_w, display_w = s.back_buffer_w;
+            const float scale = display_w != 0 ? static_cast<float>(render_w) / static_cast<float>(display_w) : 0.0f;
+            ImGui::Text("Rendering resolution: %u x %u (%.2f x the display)", render_w, s.render_h, scale);
+            ImGui::Text("Display resolution:   %u x %u", display_w, s.back_buffer_h);
+
+            if (!dlss_selected) {
+                return;
+            }
+
+            if (render_w == 0 || render_w >= display_w) {
+                ImGui::TextUnformatted("Upscaling inactive: the game renders at the display resolution.");
+                ImGui::TextUnformatted("Set the in-game supersampling below 1.0 (or an FSR mode) to use DLSS.");
+                return;
+            }
+
+            ImGui::Text("Upscaling: %s", s.upscale_status);
+            ImGui::Text("DLSS: %s", dlss::status().c_str());
+            ImGui::Text("Jitter: %d phases", s.jitter_phases);
+
+            const upscale_info info = dlss::info();
+
+            if (info.modes.empty()) {
+                return;
+            }
+
+            // Each mode's range comes from the API for this display size. The game
+            // picks the render size: its supersampling should fall in the range.
+            if (ImGui::BeginTable("modes", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit)) {
+                ImGui::TableSetupColumn("DLSS mode");
+                ImGui::TableSetupColumn("Optimal");
+                ImGui::TableSetupColumn("Accepted render sizes");
+                ImGui::TableSetupColumn("Scale");
+                ImGui::TableHeadersRow();
+
+                for (const upscale_mode& m : info.modes) {
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%s%s", m.name, std::strcmp(m.name, info.mode) == 0 ? " (in use)" : "");
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%u x %u", m.optimal_w, m.optimal_h);
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%u x %u - %u x %u", m.min_w, m.min_h, m.max_w, m.max_h);
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%.2f", static_cast<float>(m.optimal_w) / static_cast<float>(display_w));
+                }
+
+                ImGui::EndTable();
+            }
+
+            ImGui::TextUnformatted("Scale: the in-game supersampling closest to the mode's optimal size.");
+        }
+
+
         void draw_main(addon_state& s, change_tracker& edit)
         {
             if (edit(ImGui::Checkbox("Enable anti-aliasing (Ctrl+Shift+T)", &s.config.taa_enabled))) {
@@ -85,6 +165,8 @@ namespace edaa
             else if (s.config.aa_method == static_cast<int>(aa_method::xess) && (EDAA_DEVELOPER || xess::availability() == 1)) {
                 ImGui::Text("XeSS: %s", xess::status().c_str());
             }
+
+            draw_upscaling(s, edit);
 
             if (s.map_mode) {
                 ImGui::Text("Map on screen: TAA paused (%s)", s.map_reason);

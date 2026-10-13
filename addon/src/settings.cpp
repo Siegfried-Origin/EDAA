@@ -51,6 +51,7 @@ namespace edaa
             EDAA_FIELD(jitter_overlay_draws, boolean),
             EDAA_FIELD(aa_method, integer),
             EDAA_FIELD(upscaler_jitter_flip, boolean),
+            EDAA_FIELD(upscaling, integer),
         };
 #undef EDAA_FIELD
 

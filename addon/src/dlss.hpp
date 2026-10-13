@@ -1,5 +1,6 @@
-// NVIDIA DLSS in DLAA mode (render size = output size) through NGX D3D11,
-// as an alternative to the EDAA TAA resolve. Built in when the DLSS SDK is
+// NVIDIA DLSS through NGX D3D11: DLAA (render size = output size) as an
+// alternative to the EDAA TAA resolve, or upscaling in place of the game's
+// final upscale. Built in when the DLSS SDK is
 // present (submodule third_party/dlss, EDAA_DLSS=1); otherwise every call reports
 // that DLSS is not available.
 
@@ -18,6 +19,14 @@ namespace edaa::dlss
     // EDAA TAA and status() says why. Render thread only (NGX is not
     // thread-safe). Initialises NGX on the first call.
     bool evaluate(ID3D11Device* device, ID3D11DeviceContext* ctx, const upscaler_inputs& in);
+
+    // Upscaling (in.output_width/height larger than the render size): uses the
+    // quality mode whose render size range (NGX optimal settings) contains the
+    // render size. Same return convention as evaluate().
+    bool upscale(ID3D11Device* device, ID3D11DeviceContext* ctx, const upscaler_inputs& in);
+
+    // Modes for the last display size and the one used by upscale(). Any thread.
+    upscale_info info();
 
     // Checks once per device whether DLSS can run on this system
     // (RTX GPU, driver, nvngx_dlss.dll), so the overlay only offers it when it can. Render thread.

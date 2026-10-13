@@ -11,6 +11,10 @@
 //   2. TAA pass: current scene + reprojected history -> new history (RGBA16F);
 //   3. copy pass: new history -> game's HDR scene target, consumed by the
 //      game's HUD, bloom, tonemap, SMAA and downsample.
+// Upscaling (render size below the display size, DLSS selected): only the
+// motion pass runs there. The game's final upscale draw (tonemapped image ->
+// back buffer) is then replaced by DLSS on that image, with the scene depth,
+// the motion vectors and the jitter (run_upscale).
 // At Present: optional debug view over the back buffer, then auto capture.
 // Rendering uses D3D11 directly, with the game's state saved and restored.
 
@@ -89,6 +93,9 @@ namespace edaa
             target motion, mask, history[2];
             target upscaler_output; // DLAA/XeSS output (UAV), created on first use
             target depth_copy; // R32_FLOAT copy of the scene depth for XeSS
+            target upscale_input; // upscaling: typed copy of the game's tonemapped image (it is typeless)
+            target upscale_output; // upscaling: display-size UAV output, drawn into the game's target
+            uint64_t upscale_frame = 0; // frame of the last upscale (+1: the upscaler history is usable)
             int upscaler_last = -1; // aa_method that ran last frame (-1: none): its history is usable
             int history_index = 0; // history[history_index] = last output
             bool history_valid = false;
@@ -199,12 +206,12 @@ namespace edaa
         }
 
 
-        bool create_target(DXGI_FORMAT format, target& t, UINT extra_bind_flags = 0)
+        bool create_texture(uint32_t width, uint32_t height, DXGI_FORMAT format, target& t, UINT extra_bind_flags)
         {
             t = {};
             D3D11_TEXTURE2D_DESC desc = {};
-            desc.Width = gpu.width;
-            desc.Height = gpu.height;
+            desc.Width = width;
+            desc.Height = height;
             desc.MipLevels = 1;
             desc.ArraySize = 1;
             desc.Format = format;
@@ -213,6 +220,25 @@ namespace edaa
             return SUCCEEDED(gpu.device->CreateTexture2D(&desc, nullptr, &t.tex)) &&
                 SUCCEEDED(gpu.device->CreateRenderTargetView(t.tex.Get(), nullptr, &t.rtv)) &&
                 SUCCEEDED(gpu.device->CreateShaderResourceView(t.tex.Get(), nullptr, &t.srv));
+        }
+
+
+        // Render-size target.
+        bool create_target(DXGI_FORMAT format, target& t, UINT extra_bind_flags = 0)
+        {
+            return create_texture(gpu.width, gpu.height, format, t, extra_bind_flags);
+        }
+
+
+        bool has_size(const target& t, uint32_t width, uint32_t height)
+        {
+            if (!t.tex) {
+                return false;
+            }
+
+            D3D11_TEXTURE2D_DESC desc;
+            t.tex->GetDesc(&desc);
+            return desc.Width == width && desc.Height == height;
         }
 
 
@@ -502,8 +528,30 @@ namespace edaa
             uint32_t render_w = 0, render_h = 0;
             uint64_t scene_depth = 0, scene_color = 0;
             bool camera_cut = false;
+            bool upscaling = false; // motion vectors only: the upscaler runs at the end of the frame
             settings config;
         };
+
+
+        // What the resolve leaves for run_upscale (gpu_mutex).
+        struct upscale_frame
+        {
+            float jitter_x = 0, jitter_y = 0;
+            bool camera_cut = false;
+            uint32_t render_w = 0, render_h = 0;
+        };
+
+        upscale_frame upscale_in;
+
+        // Sizes the upscaler last failed with: the TAA runs instead, retried after a while (state locked).
+        struct upscale_failure
+        {
+            uint32_t render_w = 0, render_h = 0, display_w = 0, display_h = 0;
+            uint64_t frame = 0;
+        };
+
+        upscale_failure upscale_failed;
+        constexpr uint64_t upscale_retry_frames = 600;
 
 
         // Most-used camera of the frame in progress (state locked).
@@ -693,9 +741,11 @@ namespace edaa
             ctx->PSSetShader(gpu.ps_motion.Get(), nullptr, 0);
             ctx->Draw(3, 0);
 
-            if (!in.config.taa_enabled) {
+            if (!in.config.taa_enabled || in.upscaling) {
                 gpu.history_valid = false;
                 gpu.upscaler_last = -1;
+                upscaler_used = -1;
+                upscale_in = { in.jitter_x, in.jitter_y, in.camera_cut, in.render_w, in.render_h };
                 return nullptr;
             }
 
@@ -851,6 +901,15 @@ namespace edaa
                     }
                 }
 
+                if (s.upscale_pending && !s.upscale_attempted) {
+                    s.upscale_status = "no draw into the back buffer after the resolve this frame";
+                    upscale_failed = { s.render_w, s.render_h, s.back_buffer_w, s.back_buffer_h, s.frame };
+                }
+                else if (!s.upscale_pending && std::strcmp(s.upscale_status, "running") == 0) {
+                    s.upscale_status = "off";
+                }
+
+                s.jitter_allowed = resolved && (s.motion_ok || !s.config.taa_enabled); // TAA off: jitter-only compare mode
                 s.resolved_this_frame = false;
                 config = s.config;
                 finish_camera_frame(s);
@@ -963,6 +1022,12 @@ namespace edaa
             if (s.on_foot && s.config.mask_auto_off_on_foot && s.config.mask_source == 1) {
                 in.config.mask_distance = 0.0f; // no vehicle: everything uses camera motion
             }
+
+            const upscale_failure& f = upscale_failed;
+            const bool failed_here = f.render_w == s.render_w && f.render_h == s.render_h && f.display_w == s.back_buffer_w &&
+                f.display_h == s.back_buffer_h && s.frame < f.frame + upscale_retry_frames;
+            in.upscaling = s.config.taa_enabled && s.config.upscaling == static_cast<int>(upscaler::dlss) && s.render_w < s.back_buffer_w &&
+                dlss::availability() == 1 && !failed_here;
         }
 
         const char* error = "disabled";
@@ -981,10 +1046,14 @@ namespace edaa
 
         const std::lock_guard<std::recursive_mutex> lock(s.mutex);
         s.motion_ok = error == nullptr;
+        s.upscale_pending = in.upscaling && error == nullptr;
         const bool neural_wanted = in.config.aa_method != static_cast<int>(aa_method::taa);
 
         if (error != nullptr) {
             s.motion_status = error;
+        }
+        else if (in.upscaling) {
+            s.motion_status = "ok (NVIDIA DLSS upscaling)";
         }
         else if (!in.config.taa_enabled) {
             s.motion_status = "ok (motion vectors only)";
@@ -1001,6 +1070,134 @@ namespace edaa
         else {
             s.motion_status = in.camera_cut ? "ok (history reset: camera cut)" : "ok";
         }
+    }
+
+
+    bool run_upscale(command_list* cmd_list)
+    {
+        addon_state& s = state();
+        uint32_t render_w, render_h, display_w, display_h;
+        uint64_t frame, last_image;
+        bool jitter_flip;
+        {
+            const std::lock_guard<std::recursive_mutex> lock(s.mutex);
+            render_w = s.render_w;
+            render_h = s.render_h;
+            display_w = s.back_buffer_w;
+            display_h = s.back_buffer_h;
+            frame = s.frame;
+            jitter_flip = s.config.upscaler_jitter_flip;
+            last_image = s.ldr_image;
+        }
+
+        auto* const device = reinterpret_cast<ID3D11Device*>(cmd_list->get_device()->get_native());
+        auto* const ctx = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());
+        const char* error = nullptr;
+
+        try {
+            // The game's upscale: a display-size target without depth. Bilinear
+            // upscale: it reads the render-size image in PS slot 0. FSR: it reads
+            // the compute EASU output (display size); the render-size image is
+            // then the last one the game drew (SMAA output).
+            ComPtr<ID3D11ShaderResourceView> source_view;
+            ComPtr<ID3D11RenderTargetView> target_view;
+            ComPtr<ID3D11DepthStencilView> depth_view;
+            ctx->PSGetShaderResources(0, 1, &source_view);
+            ctx->OMGetRenderTargets(1, &target_view, &depth_view);
+            ComPtr<ID3D11Resource> source;
+            D3D11_TEXTURE2D_DESC source_desc = {};
+
+            if (source_view) {
+                source_view->GetResource(&source);
+            }
+
+            auto describe = [&] {
+                ComPtr<ID3D11Texture2D> tex;
+                source_desc = {};
+
+                if (source && SUCCEEDED(source.As(&tex))) {
+                    tex->GetDesc(&source_desc);
+                }
+            };
+            describe();
+
+            if (source_desc.Width != render_w && last_image != 0) {
+                source = reinterpret_cast<ID3D11Resource*>(last_image);
+                describe();
+            }
+
+            const std::lock_guard<std::mutex> lock(gpu_mutex);
+
+            if (!target_view || depth_view || source_desc.Width != render_w || source_desc.Height != render_h) {
+                error = "the game's final upscale draw was not recognised (first draw into the back buffer)";
+            }
+            else if (gpu.device != device || !gpu.motion.tex || gpu.depth.handle == 0 || upscale_in.render_w != render_w ||
+                upscale_in.render_h != render_h) {
+                error = "no motion vectors this frame";
+            }
+            else if ((!has_size(gpu.upscale_output, display_w, display_h) &&
+                         !create_texture(display_w, display_h, DXGI_FORMAT_R8G8B8A8_UNORM, gpu.upscale_output, D3D11_BIND_UNORDERED_ACCESS)) ||
+                (!has_size(gpu.upscale_input, render_w, render_h) &&
+                    !create_texture(render_w, render_h, DXGI_FORMAT_R8G8B8A8_UNORM, gpu.upscale_input, 0))) {
+                error = "cannot create the upscaler textures";
+            }
+            else if (source_desc.Format != DXGI_FORMAT_R8G8B8A8_TYPELESS && source_desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM &&
+                source_desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM_SRGB) {
+                error = "unexpected format of the game's image (not R8G8B8A8)";
+            }
+            else {
+                // The game's image is typeless: DLSS gets a typed copy.
+                ctx->CopyResource(gpu.upscale_input.tex.Get(), source.Get());
+                upscaler_inputs u;
+                u.color = gpu.upscale_input.tex.Get();
+                u.depth = reinterpret_cast<ID3D11Resource*>(gpu.depth.handle);
+                u.motion = gpu.motion.tex.Get();
+                u.output = gpu.upscale_output.tex.Get();
+                u.width = render_w;
+                u.height = render_h;
+                u.output_width = display_w;
+                u.output_height = display_h;
+                u.hdr = false;
+                const float sign = jitter_flip ? -1.0f : 1.0f;
+                u.jitter_x = upscale_in.jitter_x * sign;
+                u.jitter_y = upscale_in.jitter_y * sign;
+                u.reset = upscale_in.camera_cut || gpu.upscale_frame + 1 != frame;
+
+                const state_backup backup(ctx);
+                bind_srvs(ctx, {});
+                ctx->OMSetRenderTargets(0, nullptr, nullptr);
+
+                if (dlss::upscale(device, ctx, u)) {
+                    // Into the game's own target view, whatever the back buffer format.
+                    gpu.upscale_frame = frame;
+                    bind_fullscreen(ctx);
+                    set_viewport(ctx, static_cast<float>(display_w), static_cast<float>(display_h));
+                    ID3D11RenderTargetView* const targets[] = { target_view.Get() };
+                    ctx->OMSetRenderTargets(1, targets, nullptr);
+                    bind_srvs(ctx, { nullptr, gpu.upscale_output.srv.Get() });
+                    ctx->PSSetShader(gpu.ps_copy.Get(), nullptr, 0);
+                    ctx->Draw(3, 0);
+                }
+                else {
+                    error = "DLSS could not upscale (see the DLSS line and ReShade.log)";
+                }
+            }
+        }
+        catch (...) {
+            error = "internal error (exception)";
+        }
+
+        const std::lock_guard<std::recursive_mutex> lock(s.mutex);
+        s.upscale_status = error == nullptr ? "running" : error;
+
+        if (error != nullptr) {
+            // The game's draw runs instead (this frame is not anti-aliased); EDAA TAA until a retry.
+            upscale_failed = { render_w, render_h, display_w, display_h, frame };
+            reshade::log::message(reshade::log::level::warning,
+                (std::string("EDAA: upscaling paused: ") + error + " (DLSS: " + dlss::status() + ")").c_str());
+        }
+
+        return error == nullptr;
     }
 
 

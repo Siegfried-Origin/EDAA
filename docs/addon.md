@@ -67,6 +67,10 @@ Per frame, in the order the game draws:
    the next frames get no jitter and no TAA, and the history is reset when
    the map closes. The main menu hangar (476 G-buffer draws) keeps the TAA;
    loading screens and most likely the galaxy map are paused.
+   Besides, the jitter only runs when the previous frame's resolve succeeded:
+   the galaxy map is not detected as a map, but it has no main perspective
+   camera, so the resolve stops ("waiting for two frames with a main
+   camera") and the jitter, left alone, made the map shake.
    See reverse-engineering.md section 8.
 6b. **NVIDIA DLAA** (`dlss.cpp`, "Method" in the overlay): DLSS at native
    resolution (render size = output size) through NGX D3D11, run at the same
@@ -99,6 +103,34 @@ Per frame, in the order the game draws:
    selected in the normal build. A saved method that cannot run falls back
    to the TAA silently. Developer builds can select every method, with the
    "DLSS:" / "XeSS:" line saying why one cannot run.
+6e. **DLSS upscaling** ("Upscaling" in the overlay, work in progress): when
+   the game renders below the display size (in-game supersampling < 1.0 or
+   FSR), it tonemaps and applies SMAA at render size, then draws that image
+   into the back buffer with one bilinear (or FSR) draw before the 2D UI
+   (`analysis/fsr-frame5208`, EID 9677). With DLSS selected, the resolve
+   point only builds the motion vectors (no TAA, no DLAA), and the first
+   draw into a display-size target after it is examined: a render-size
+   texture in PS slot 0, a render target, no depth (`run_upscale`). With FSR
+   that draw reads the display-size output of a compute pass (EASU) instead:
+   the input is then the last render-size R8G8B8A8 target drawn after the
+   resolve (SMAA output). The image is typeless (R8G8B8A8_TYPELESS), so it
+   is copied into a typed texture. DLSS
+   then upscales that tonemapped image (no IsHDR, no AutoExposure) with the
+   scene depth, the motion vectors and the jitter into a display-size
+   R8G8B8A8 UAV texture, which is drawn into the game's target, and the
+   game's draw is skipped. The quality mode is the one whose render size
+   range (`NGX_DLSS_GET_OPTIMAL_SETTINGS`: min/max for each mode at this
+   display size, logged once) contains the render size, closest to its
+   optimal size, else the mode with the closest optimal size; the
+   feature is created for the actual render size. The overlay shows the
+   rendering and display resolutions, the modes with their ranges and the
+   mode in use. The Halton sequence grows to `phases x (display / render)^2`
+   (NVIDIA: 8 x ratio^2) so each display pixel gets as many samples as at
+   native resolution. If the draw is not recognised or DLSS fails, the game's
+   draw runs, the TAA is used for these sizes and upscaling is retried after
+   600 frames. Not done yet: the HUD (drawn into the scene after the resolve,
+   not jittered) is upscaled with the world (mask planned), texture mip bias
+   for the render size, XeSS.
 7. **At Present** (`passes.cpp`, `capture.cpp`): optional debug view over the
    back buffer, auto capture, next jitter phase.
 
@@ -177,6 +209,7 @@ defaults" restores the values below. The debug view always starts off.
 | Reconstruction filter | off | current sample = Gaussian 3x3 around the unjittered pixel centre; meant to make thin highlights fade instead of flicker, but in game it softens the image without a visible gain |
 | Unjitter current sample | off | softer image (when the filter is off) |
 | Resolve before the HUD pass | on | HUD/holograms out of the TAA |
+| Upscaling | Game | Game (bilinear or FSR) or NVIDIA DLSS when rendering below the display size |
 | Vehicle mask | game stencil | or distance to camera (with auto-off on foot) |
 | Capture folder (developer) | `%USERPROFILE%\Documents\EDAA-captures` | stored as `[EDAA] CapturePath` in `ReShade.ini` |
 

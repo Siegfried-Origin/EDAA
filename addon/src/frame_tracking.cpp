@@ -11,6 +11,8 @@
 //    not fullscreen triangles; plus decals, light volumes and glows (other
 //    depth tests, or the HDR target only), which otherwise z-fight.
 //  * TAA resolve point: before the cockpit HUD pass (see check_resolve_point).
+//  * Upscaling: the game's final upscale is the first draw into a display-size
+//    target after the resolve (see check_upscale_draw).
 //  * Frame trace for diagnostics (one frame of binds and draws in the log).
 
 #include "events.hpp"
@@ -390,6 +392,19 @@ namespace edaa
             }
 
             if (dsv.handle == 0) {
+                // Upscaling input when the game's upscale does not read it directly (FSR).
+                const bool ldr = ctx->rt0_format == format::r8g8b8a8_typeless || ctx->rt0_format == format::r8g8b8a8_unorm ||
+                    ctx->rt0_format == format::r8g8b8a8_unorm_srgb;
+
+                if (ctx->rt0 != 0 && ldr) {
+                    addon_state& s = state();
+                    const std::lock_guard<std::recursive_mutex> lock(s.mutex);
+
+                    if (s.resolved_this_frame && ctx->rt0_w == s.render_w && ctx->rt0_h == s.render_h) {
+                        s.ldr_image = ctx->rt0;
+                    }
+                }
+
                 return;
             }
 
@@ -485,7 +500,8 @@ namespace edaa
                     ctx->game_viewport.width == static_cast<float>(s.render_w) &&
                     ctx->game_viewport.height == static_cast<float>(s.render_h);
                 // Nothing drawn after the TAA resolve is accumulated: do not jitter it.
-                want = (scene_draw || overlay_draw) && s.config.jitter_enabled && !s.resolved_this_frame && !s.map_mode && !s.screenshot_mode;
+                want = (scene_draw || overlay_draw) && s.config.jitter_enabled && s.jitter_allowed && !s.resolved_this_frame && !s.map_mode &&
+                    !s.screenshot_mode;
                 jx = s.jitter_x;
                 jy = s.jitter_y;
 
@@ -599,10 +615,42 @@ namespace edaa
         }
 
 
+        // When rendering below the display size, the game draws its tonemapped,
+        // render-size image into the back buffer (bilinear or FSR) before the 2D
+        // UI. Only that first draw into a display-size target is examined.
+        bool check_upscale_draw(command_list* cmd_list)
+        {
+            auto* ctx = cmd_list->get_private_data<context_state>();
+
+            if (ctx == nullptr) {
+                return false;
+            }
+
+            {
+                addon_state& s = state();
+                const std::lock_guard<std::recursive_mutex> lock(s.mutex);
+
+                if (!s.upscale_pending || s.upscale_attempted || ctx->rt0 == 0 || ctx->rt0 == s.scene_color ||
+                    ctx->rt0_w != s.back_buffer_w || ctx->rt0_h != s.back_buffer_h) {
+                    return false;
+                }
+
+                s.upscale_attempted = true;
+            }
+
+            return run_upscale(cmd_list);
+        }
+
+
         bool on_draw(command_list* cmd_list, uint32_t vertex_count, uint32_t instance_count, uint32_t, uint32_t)
         {
             const bool fullscreen = vertex_count == 3 && instance_count == 1;
             check_resolve_point(cmd_list);
+
+            if (check_upscale_draw(cmd_list)) {
+                return true; // replaced by the upscaler
+            }
+
             update_viewport(cmd_list, fullscreen, vertex_count == 4 && instance_count == 1);
 
             if (auto* ctx = cmd_list->get_private_data<context_state>()) {
@@ -616,6 +664,11 @@ namespace edaa
         bool on_draw_indexed(command_list* cmd_list, uint32_t index_count, uint32_t instance_count, uint32_t, int32_t, uint32_t)
         {
             check_resolve_point(cmd_list);
+
+            if (check_upscale_draw(cmd_list)) {
+                return true;
+            }
+
             update_viewport(cmd_list, false);
 
             if (auto* ctx = cmd_list->get_private_data<context_state>()) {
@@ -678,6 +731,10 @@ namespace edaa
 
         s.exposure_seen = false;
         s.exposure_target = 0;
+        const bool upscaled = s.upscale_pending; // this frame ran for the upscaler
+        s.upscale_pending = false;
+        s.upscale_attempted = false;
+        s.ldr_image = 0;
         s.depth_candidate = s.color_candidate = 0;
         s.candidate_w = s.candidate_h = 0;
 
@@ -685,8 +742,18 @@ namespace edaa
         s.current = {};
         s.frame++;
 
+        // Upscaling: each display pixel must see as many samples as at native
+        // resolution, so the sequence grows with the pixel area ratio
+        // (NVIDIA: 8 x ratio^2 phases).
+        s.jitter_phases = std::max(1, s.config.jitter_phases);
+
+        if (upscaled && s.render_w != 0 && s.render_w < s.back_buffer_w) {
+            const float ratio = static_cast<float>(s.back_buffer_w) / static_cast<float>(s.render_w);
+            s.jitter_phases = static_cast<int>(std::ceil(static_cast<float>(s.jitter_phases) * ratio * ratio));
+        }
+
         // Next Halton(2,3) sample, centred on the pixel: [-0.5, 0.5).
-        const uint32_t phases = s.config.jitter_phases > 0 ? static_cast<uint32_t>(s.config.jitter_phases) : 1;
+        const uint32_t phases = static_cast<uint32_t>(s.jitter_phases);
         const uint32_t index = static_cast<uint32_t>(s.frame % phases) + 1;
         s.jitter_x = (halton(index, 2) - 0.5f) * s.config.jitter_scale;
         s.jitter_y = (halton(index, 3) - 0.5f) * s.config.jitter_scale;
