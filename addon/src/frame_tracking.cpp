@@ -394,9 +394,7 @@ namespace edaa
             }
 
             const resource depth = dev->get_resource_from_view(dsv);
-
             addon_state& s = state();
-            const std::lock_guard<std::recursive_mutex> lock(s.mutex);
 
             // The scene depth is bound with the 4 G-buffer targets (4 real, same-size
             // render targets; shadow passes bind 4 empty slots). The 256x256
@@ -404,25 +402,41 @@ namespace edaa
             // depth buffers (HUD, shadows) are never treated as the scene.
             // The choice is re-made every frame (advance_frame), so a smaller depth
             // buffer after a resolution change is picked up too.
-            if (count >= 4 && rtvs[3].handle != 0) {
-                s.current.gbuffer_binds++;
+            // No device call with the state locked: a game thread destroying a
+            // resource holds the D3D11 lock and waits for the state lock in
+            // on_destroy_resource (deadlock seen on resolution changes).
+            uint64_t known_candidate;
+            {
+                const std::lock_guard<std::recursive_mutex> lock(s.mutex);
+                known_candidate = s.depth_candidate;
+
+                if (count >= 4 && rtvs[3].handle != 0) {
+                    s.current.gbuffer_binds++;
+                }
             }
 
-            if (count >= 4 && depth.handle != s.depth_candidate) {
-                const resource_desc desc = dev->get_resource_desc(depth);
+            resource_desc desc = {};
+            uint64_t color = 0;
 
-                if (desc.type == resource_type::texture_2d && desc.texture.samples <= 1 &&
-                    uint64_t(desc.texture.width) * desc.texture.height > uint64_t(s.candidate_w) * s.candidate_h &&
-                    same_aspect_as_back_buffer(s, desc.texture.width, desc.texture.height) &&
-                    is_gbuffer_binding(dev, count, rtvs, desc)) {
-                    s.depth_candidate = depth.handle;
-                    s.color_candidate = dev->get_resource_from_view(rtvs[3]).handle; // RT3 = HDR scene
-                    s.candidate_w = desc.texture.width;
-                    s.candidate_h = desc.texture.height;
+            if (count >= 4 && depth.handle != known_candidate) {
+                desc = dev->get_resource_desc(depth);
 
-                    if (s.scene_depth == 0) {
-                        use_depth_candidate(s);
-                    }
+                if (desc.type == resource_type::texture_2d && desc.texture.samples <= 1 && is_gbuffer_binding(dev, count, rtvs, desc)) {
+                    color = dev->get_resource_from_view(rtvs[3]).handle; // RT3 = HDR scene
+                }
+            }
+
+            const std::lock_guard<std::recursive_mutex> lock(s.mutex);
+
+            if (color != 0 && uint64_t(desc.texture.width) * desc.texture.height > uint64_t(s.candidate_w) * s.candidate_h &&
+                same_aspect_as_back_buffer(s, desc.texture.width, desc.texture.height)) {
+                s.depth_candidate = depth.handle;
+                s.color_candidate = color;
+                s.candidate_w = desc.texture.width;
+                s.candidate_h = desc.texture.height;
+
+                if (s.scene_depth == 0) {
+                    use_depth_candidate(s);
                 }
             }
 
