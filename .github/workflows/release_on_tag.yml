@@ -47,7 +47,14 @@ jobs:
       - name: Zip add-on
         shell: pwsh
         run: |
-          Compress-Archive -Path build\Release\EDAA.addon64, README.md -DestinationPath "installer\Output\EDAA-${{ steps.version.outputs.version }}.zip"
+          # Add-on + DLSS library, README, notices and licenses.
+          $zip = "installer\Output\zip"
+          New-Item -ItemType Directory -Force "$zip\licenses" | Out-Null
+          Copy-Item build\Release\EDAA.addon64, build\Release\nvngx_dlss.dll, README.md, LICENSE, THIRD_PARTY_NOTICES.md $zip
+          Copy-Item third_party\dlss\LICENSE.txt "$zip\licenses\NVIDIA-RTX-SDKs-LICENSE.txt"
+          Copy-Item third_party\reshade\LICENSE.md "$zip\licenses\ReShade-LICENSE.md"
+          Copy-Item third_party\imgui\LICENSE.txt "$zip\licenses\ImGui-LICENSE.txt"
+          Compress-Archive -Path "$zip\*" -DestinationPath "installer\Output\EDAA-${{ steps.version.outputs.version }}.zip"
 
       - name: Publish release
         uses: softprops/action-gh-release@v2

@@ -6,16 +6,22 @@
 ;   whether it is the build with full add-on support. If needed, offers to
 ;   download the official ReShade setup from reshade.me and run it silently
 ;   for the game (API DXGI), or to open reshade.me.
-; - Copies EDAA.addon64 next to dxgi.dll. The uninstaller and the README go
-;   to Program Files\EDAA (the game folder already has Frontier's unins000.exe).
+; - Copies EDAA.addon64 next to dxgi.dll, and nvngx_dlss.dll (NVIDIA DLAA)
+;   when the build has it. The uninstaller, README, third-party notices and
+;   licenses go to Program Files\EDAA (the game folder already has Frontier's
+;   unins000.exe). Uninstalling removes them all; ReShade stays.
 ;
-; Build: ISCC /DAppVersion=1.0.0 installer\EDAA.iss  (expects build\Release\EDAA.addon64)
+; Build: ISCC /DAppVersion=1.0.0 installer\EDAA.iss  (expects build\Release\EDAA.addon64,
+; and nvngx_dlss.dll next to it for DLAA; the submodules provide the licenses)
 
 #ifndef AppVersion
   #define AppVersion "dev"
 #endif
 #ifndef AddonFile
   #define AddonFile "..\build\Release\EDAA.addon64"
+#endif
+#ifndef DlssFile
+  #define DlssFile "..\build\Release\nvngx_dlss.dll"
 #endif
 #define AppName "EDAA"
 #define AppPublisher "Siegfried Origin"
@@ -56,7 +62,16 @@ WizardStyle=modern
 
 [Files]
 Source: "{#AddonFile}"; DestDir: "{app}"; Flags: ignoreversion
+#if FileExists(AddBackslash(SourcePath) + DlssFile)
+; Release DLSS library (NVIDIA RTX SDKs license), loaded by the add-on for DLAA.
+Source: "{#DlssFile}"; DestDir: "{app}"; Flags: ignoreversion
+#endif
 Source: "..\README.md"; DestDir: "{autopf}\EDAA"; Flags: ignoreversion
+Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{autopf}\EDAA"; Flags: ignoreversion
+Source: "..\LICENSE"; DestDir: "{autopf}\EDAA"; DestName: "LICENSE.txt"; Flags: ignoreversion
+Source: "..\third_party\dlss\LICENSE.txt"; DestDir: "{autopf}\EDAA\licenses"; DestName: "NVIDIA-RTX-SDKs-LICENSE.txt"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\third_party\reshade\LICENSE.md"; DestDir: "{autopf}\EDAA\licenses"; DestName: "ReShade-LICENSE.md"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\third_party\imgui\LICENSE.txt"; DestDir: "{autopf}\EDAA\licenses"; DestName: "ImGui-LICENSE.txt"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Code]
 const
@@ -408,7 +423,7 @@ end;
 function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfo, MemoTypeInfo, MemoComponentsInfo, MemoGroupInfo, MemoTasksInfo: String): String;
 begin
   Result := 'Game folder:' + NewLine + Space + GamePath + NewLine + NewLine +
-    'Files:' + NewLine + Space + 'EDAA.addon64 (next to dxgi.dll)' + NewLine + NewLine +
+    'Files:' + NewLine + Space + 'EDAA.addon64 and nvngx_dlss.dll (next to dxgi.dll)' + NewLine + NewLine +
     'ReShade:' + NewLine + Space + ReShadeStatusText();
   if ReShadeState <> 'ok' then
   begin

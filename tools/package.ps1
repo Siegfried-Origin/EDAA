@@ -24,6 +24,9 @@ $name = "EDAA-" + (Get-Date -Format "yyyyMMdd-HHmm")
 $dir = Join-Path $root "dist\$name"
 New-Item -ItemType Directory -Force $dir | Out-Null
 Copy-Item build\Release\EDAA.addon64 $dir
+if (Test-Path build\Release\nvngx_dlss.dll) {
+    Copy-Item build\Release\nvngx_dlss.dll $dir # NVIDIA DLAA (release library)
+}
 
 $install = @'
 EDAA - temporal anti-aliasing for Elite Dangerous (ReShade add-on)
