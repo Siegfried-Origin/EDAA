@@ -5,6 +5,7 @@
 // EDAA_DEVELOPER, or a Debug build): also jitter, debug views, auto capture,
 // camera decoding and diagnostics. Every change is saved to ReShade.ini.
 
+#include "dlss.hpp"
 #include "state.hpp"
 
 #include <cstring>
@@ -29,11 +30,19 @@ namespace edaa
 
         void draw_main(addon_state& s, change_tracker& edit)
         {
-            if (edit(ImGui::Checkbox("Enable TAA (Ctrl+Shift+T)", &s.config.taa_enabled))) {
+            if (edit(ImGui::Checkbox("Enable anti-aliasing (Ctrl+Shift+T)", &s.config.taa_enabled))) {
                 s.config.jitter_enabled = s.config.taa_enabled;
             }
 
+            if (edit(ImGui::Combo("Method", &s.config.aa_method, "EDAA TAA\0NVIDIA DLAA (DLSS at native resolution)\0"))) {
+                s.history_reset = true;
+            }
+
             ImGui::Text("Status: %s", s.config.taa_enabled ? s.motion_status : "off");
+
+            if (s.config.aa_method == static_cast<int>(aa_method::dlaa)) {
+                ImGui::Text("DLSS: %s", dlss::status().c_str());
+            }
 
             if (s.map_mode) {
                 ImGui::Text("Map on screen: TAA paused (%s)", s.map_reason);
@@ -139,6 +148,7 @@ namespace edaa
             edit(ImGui::SliderInt("Halton phases", &s.config.jitter_phases, 1, 32));
             edit(ImGui::SliderFloat("Amplitude (pixels)", &s.config.jitter_scale, 1.0f, 16.0f, "%.1f"));
             edit(ImGui::Checkbox("Jitter decals, light volumes and glows (off: they z-fight and flicker)", &s.config.jitter_overlay_draws));
+            edit(ImGui::Checkbox("DLSS: negate the jitter offset (sign convention check)", &s.config.dlss_jitter_flip));
             ImGui::Text("Current offset: %+.3f, %+.3f px", s.jitter_x, s.jitter_y);
             ImGui::Text("Last frame: %u of %u scene draws jittered", s.last.jittered_draws, s.last.scene_draws);
 

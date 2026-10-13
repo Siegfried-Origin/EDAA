@@ -16,6 +16,9 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
+        with:
+          # ReShade, ImGui and the DLSS SDK (shallow, at the pinned commits).
+          submodules: true
 
       - name: Version from tag
         id: version

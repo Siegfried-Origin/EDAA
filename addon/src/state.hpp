@@ -22,8 +22,18 @@ namespace edaa
         temporal_change = 6, // how much the TAA output changed since the last frame (flicker finder, camera still)
     };
 
+    // Which resolve replaces the game's anti-aliasing.
+    enum class aa_method : int
+    {
+        taa = 0, // EDAA TAA (taa.hlsl)
+        dlaa = 1, // NVIDIA DLSS at native resolution (dlss.cpp); falls back to TAA if unavailable
+    };
+
+
     struct settings
     {
+        int aa_method = 0; // aa_method
+        bool dlss_jitter_flip = false; // developer: negate the jitter passed to DLSS (sign convention check)
         bool jitter_enabled = true; // follows taa_enabled unless changed in developer builds
         int jitter_phases = 8; // Halton(2,3) sequence length
         float jitter_scale = 1.0f; // in pixels; > 1 only to make the effect obvious when testing
@@ -165,6 +175,8 @@ namespace edaa
         bool resolved_this_frame = false; // resolve point reached
         const char* resolve_point = "none"; // which one, for the overlay
         bool exposure_seen = false; // exposure downsample of the HDR scene drawn this frame
+        uint64_t exposure_target = 0; // its render target
+        char status_text[192] = {}; // storage for a composed motion_status
         bool map_mode = false; // system/galaxy map on screen (decided from the previous frame)
         bool screenshot_mode = false; // high-resolution screenshot tiles being rendered (camera_tracker.cpp)
         int screenshot_hold = 0; // frames left before leaving screenshot mode

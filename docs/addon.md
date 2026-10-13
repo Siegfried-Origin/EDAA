@@ -36,8 +36,14 @@ Per frame, in the order the game draws:
    downsample (`R11G11B10` at 1/4 render size), or the first draw of the HUD
    pixel shader `b4523c39a461fd35`. Everything of the world is in the HDR
    target then; the HUD/holograms are drawn after the TAA: not jittered, not
-   accumulated, sharp. Fallback (option off or markers missing): right
-   before the first bloom downsample (pixel shader `b196cbbdf516e150`).
+   accumulated, sharp. If no HUD draw goes into the scene after the exposure
+   downsample (on foot), the first draw into any other target after it is
+   used (the world is complete once the exposure is measured): with bloom
+   turned off in the game options there is no bloom marker, and the TAA used
+   to stop there ("resolve point not reached"). Fallback (option off or
+   markers missing): right before the first bloom downsample (pixel shader
+   `b196cbbdf516e150`). When no marker is found, the status line lists which
+   ones the frame had (G-buffer, HDR draws, exposure, HUD, bloom).
 5. **GPU passes at the resolve point** (`passes.cpp`, D3D11 with the game's
    state saved/restored):
    1. motion vectors (`motion.hlsl`): camera reprojection from depth, jitter
@@ -62,6 +68,18 @@ Per frame, in the order the game draws:
    the map closes. The main menu hangar (476 G-buffer draws) keeps the TAA;
    loading screens and most likely the galaxy map are paused.
    See reverse-engineering.md section 8.
+6b. **NVIDIA DLAA** (`dlss.cpp`, "Method" in the overlay): DLSS at native
+   resolution (render size = output size) through NGX D3D11, run at the same
+   resolve point instead of the TAA pass. Inputs: the game's HDR scene (flag
+   IsHDR, exposure estimated by DLSS: AutoExposure), its reverse-Z depth
+   (DepthInverted), the EDAA camera motion vectors (UV, previous - current,
+   jitter removed; MV scale = render size) and the viewport jitter in pixels
+   (same sign, "negate the jitter offset" in the developer section flips it).
+   History reset on camera cuts. Output: an RGBA16F UAV texture copied back
+   into the scene target. NGX keeps the D3D11 context state. If DLSS cannot
+   run (no RTX GPU, old driver, `nvngx_dlss.dll` missing next to the add-on),
+   the TAA runs instead and the overlay line "DLSS:" says why. NGX logs go to
+   `%LOCALAPPDATA%\EDAA`.
 7. **At Present** (`passes.cpp`, `capture.cpp`): optional debug view over the
    back buffer, auto capture, next jitter phase.
 
@@ -73,12 +91,22 @@ Requirements: Visual Studio 2022/2026 with the C++ desktop workload, the
 Windows 10/11 SDK (for `fxc.exe`), CMake 3.20+.
 
 ```powershell
-.\third_party\fetch.ps1                      # ReShade v6.8.0 + ImGui headers (once)
+git submodule update --init --depth 1       # ReShade, ImGui, DLSS SDK (once)
 cmake -S . -B build -G "Visual Studio 18 2026" -A x64
 cmake --build build --config Release
 ```
 
-Output: `build\Release\EDAA.addon64` (static CRT, depends only on KERNEL32).
+Output: `build\Release\EDAA.addon64` (static CRT) and, with DLSS,
+`build\Release\nvngx_dlss.dll` (both go into the game folder).
+Dependencies are git submodules in `third_party/`, pinned to a version:
+ReShade (tag v6.8.0, add-on API headers), Dear ImGui (the commit ReShade
+6.8.0 uses) and the NVIDIA DLSS SDK (310.9.1). The DLSS repository is large
+(~1.6 GB even shallow); EDAA uses its headers, `nvsdk_ngx_s.lib` and the
+release `nvngx_dlss.dll`. The submodule only references NVIDIA's repository:
+the SDK license (NVIDIA RTX SDKs) allows shipping it only inside an
+application. Without the DLSS submodule (or with `-DEDAA_WITH_DLSS=OFF`) the
+add-on builds without DLSS:
+`git submodule update --init --depth 1 third_party/reshade third_party/imgui`.
 Developer build (debug views, jitter controls, auto capture, frame trace,
 camera and diagnostics sections, extra hotkeys): add `-DEDAA_DEVELOPER=ON`,
 e.g. `cmake -S . -B build-dev -A x64 -DEDAA_DEVELOPER=ON`; Debug builds always

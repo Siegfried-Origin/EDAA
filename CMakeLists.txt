@@ -1,11 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
 project(EDAA LANGUAGES CXX)
 
-# Third-party headers are fetched by third_party/fetch.ps1 (versions in third_party/VERSIONS.txt).
+# Dependencies are git submodules in third_party/ (pinned versions):
+#   git submodule update --init --depth 1
 set(RESHADE_INCLUDE ${CMAKE_SOURCE_DIR}/third_party/reshade/include)
 set(IMGUI_INCLUDE ${CMAKE_SOURCE_DIR}/third_party/imgui)
 if(NOT EXISTS ${RESHADE_INCLUDE}/reshade.hpp OR NOT EXISTS ${IMGUI_INCLUDE}/imgui.h)
-	message(FATAL_ERROR "Missing headers: run third_party/fetch.ps1 first")
+	message(FATAL_ERROR "Missing dependencies: run 'git submodule update --init --depth 1'")
 endif()
 
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
@@ -60,6 +61,7 @@ add_library(edaa SHARED
 	addon/src/overlay.cpp
 	addon/src/capture.cpp
 	addon/src/settings.cpp
+	addon/src/dlss.cpp
 	${SHADER_HEADER}
 	${TAA_HEADER}
 )
@@ -71,6 +73,24 @@ target_compile_definitions(edaa PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 # Developer UI (debug views, capture, diagnostics): -DEDAA_DEVELOPER=ON, always on in Debug.
 option(EDAA_DEVELOPER "Build with developer tools in the overlay" OFF)
 target_compile_definitions(edaa PRIVATE EDAA_DEVELOPER=$<IF:$<OR:$<BOOL:${EDAA_DEVELOPER}>,$<CONFIG:Debug>>,1,0>)
+# NVIDIA DLSS (DLAA): built in when the SDK submodule third_party/dlss is checked out.
+# The submodule only references NVIDIA's repository: the SDK itself is shipped
+# only inside the application (static lib + release DLL), as its license requires.
+option(EDAA_WITH_DLSS "Build with NVIDIA DLSS when the SDK is present" ON)
+set(DLSS_DIR ${CMAKE_SOURCE_DIR}/third_party/dlss)
+if(EDAA_WITH_DLSS AND EXISTS ${DLSS_DIR}/include/nvsdk_ngx_helpers.h)
+	target_include_directories(edaa SYSTEM PRIVATE ${DLSS_DIR}/include)
+	set(DLSS_LIB ${DLSS_DIR}/lib/Windows_x86_64/x64)
+	target_link_libraries(edaa PRIVATE $<IF:$<CONFIG:Debug>,${DLSS_LIB}/nvsdk_ngx_s_dbg.lib,${DLSS_LIB}/nvsdk_ngx_s.lib>)
+	target_compile_definitions(edaa PRIVATE EDAA_DLSS=1)
+	# The release nvngx_dlss.dll (never the watermarked dev one) next to
+	# EDAA.addon64, to copy both into the game folder.
+	add_custom_command(TARGET edaa POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DLSS_DIR}/lib/Windows_x86_64/rel/nvngx_dlss.dll $<TARGET_FILE_DIR:edaa>)
+else()
+	target_compile_definitions(edaa PRIVATE EDAA_DLSS=0)
+	message(STATUS "Building without DLSS (EDAA_WITH_DLSS off or SDK not in third_party/dlss)")
+endif()
 # C4702 (unreachable code) is reported by the optimizer inside reshade_overlay.hpp.
 target_compile_options(edaa PRIVATE /W4 /permissive- /utf-8 /wd4702)
 # Static CRT: no VC++ redistributable needed on the user's machine.

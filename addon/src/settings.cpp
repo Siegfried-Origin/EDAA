@@ -49,6 +49,8 @@ namespace edaa
             EDAA_FIELD(debug_motion_pixels, real),
             EDAA_FIELD(object_analysis, boolean),
             EDAA_FIELD(jitter_overlay_draws, boolean),
+            EDAA_FIELD(aa_method, integer),
+            EDAA_FIELD(dlss_jitter_flip, boolean),
         };
 #undef EDAA_FIELD
 

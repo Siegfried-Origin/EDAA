@@ -538,6 +538,7 @@ namespace edaa
                 if (!s.exposure_seen && ctx->rt0 != 0 && !into_scene && ctx->rt0_format == format::r11g11b10_float &&
                     ctx->rt0_w * 4 + 4 >= s.render_w && ctx->rt0_w * 4 <= s.render_w + 4) {
                     s.exposure_seen = true;
+                    s.exposure_target = ctx->rt0;
                 }
 
                 if (s.config.taa_before_hud && s.exposure_seen && into_scene) {
@@ -545,6 +546,13 @@ namespace edaa
                 }
                 else if (s.config.taa_before_hud && ctx->hud_ps) {
                     point = "before the HUD pass (HUD shader)";
+                }
+
+                // The world is complete once the exposure is measured. Without a HUD
+                // draw into the scene (on foot) and without bloom (graphics option
+                // off), the next pass elsewhere is the last chance before tonemapping.
+                else if (s.config.taa_before_hud && s.exposure_seen && ctx->rt0 != 0 && ctx->rt0 != s.exposure_target) {
+                    point = "after the exposure downsample (no HUD draw into the scene)";
                 }
                 else if (ctx->resolve_ps) {
                     point = "before bloom (HUD included)";
@@ -639,6 +647,7 @@ namespace edaa
         }
 
         s.exposure_seen = false;
+        s.exposure_target = 0;
         s.depth_candidate = s.color_candidate = 0;
         s.candidate_w = s.candidate_h = 0;
 
