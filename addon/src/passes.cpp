@@ -851,6 +851,9 @@ namespace edaa
                     }
                 }
 
+                // TAA off: jitter-only compare mode, never stopped.
+                s.resolve_misses = (resolved && (s.motion_ok || !s.config.taa_enabled)) ? 0 : s.resolve_misses + 1;
+                s.jitter_allowed = s.resolve_misses < 4;
                 s.resolved_this_frame = false;
                 config = s.config;
                 finish_camera_frame(s);
@@ -949,7 +952,7 @@ namespace edaa
 
             s.on_foot = in.camera.valid && first_person_body_drawn(s, in.camera);
 
-            if (s.config.jitter_enabled) {
+            if (s.config.jitter_enabled && s.jitter_allowed) { // the offset this frame was drawn with
                 in.jitter_x = s.jitter_x;
                 in.jitter_y = s.jitter_y;
             }

@@ -485,7 +485,8 @@ namespace edaa
                     ctx->game_viewport.width == static_cast<float>(s.render_w) &&
                     ctx->game_viewport.height == static_cast<float>(s.render_h);
                 // Nothing drawn after the TAA resolve is accumulated: do not jitter it.
-                want = (scene_draw || overlay_draw) && s.config.jitter_enabled && !s.resolved_this_frame && !s.map_mode && !s.screenshot_mode;
+                want = (scene_draw || overlay_draw) && s.config.jitter_enabled && s.jitter_allowed && !s.resolved_this_frame && !s.map_mode &&
+                    !s.screenshot_mode;
                 jx = s.jitter_x;
                 jy = s.jitter_y;
 

@@ -184,6 +184,11 @@ namespace edaa
         const char* map_reason = "no";
         bool history_reset = false; // drop the TAA history at the next resolve
         bool motion_ok = false; // motion vectors generated last frame
+        // Frames in a row whose resolve did not run: past a few, no jitter. Screens
+        // the resolve cannot handle (galaxy map: no main camera) would otherwise
+        // show the raw jitter. A single missed frame (main menu) keeps it.
+        int resolve_misses = 0;
+        bool jitter_allowed = true;
         const char* motion_status = "not started";
 
         bool capture_requested = false; // Ctrl+Shift+C / overlay button

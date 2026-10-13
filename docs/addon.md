@@ -67,6 +67,10 @@ Per frame, in the order the game draws:
    the next frames get no jitter and no TAA, and the history is reset when
    the map closes. The main menu hangar (476 G-buffer draws) keeps the TAA;
    loading screens and most likely the galaxy map are paused.
+   Besides, the jitter stops after 4 frames in a row without a successful
+   resolve: the galaxy map is not detected as a map, but it has no main perspective
+   camera, so the resolve stops ("waiting for two frames with a main
+   camera") and the jitter, left alone, made the map shake.
    See reverse-engineering.md section 8.
 6b. **NVIDIA DLAA** (`dlss.cpp`, "Method" in the overlay): DLSS at native
    resolution (render size = output size) through NGX D3D11, run at the same
