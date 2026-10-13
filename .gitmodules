@@ -10,3 +10,7 @@
 	path = third_party/dlss
 	url = https://github.com/NVIDIA/DLSS.git
 	shallow = true
+[submodule "third_party/xess"]
+	path = third_party/xess
+	url = https://github.com/intel/xess.git
+	shallow = true

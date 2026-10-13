@@ -100,6 +100,10 @@ namespace edaa
 
         void on_map_buffer_region(device* device, resource resource, uint64_t offset, uint64_t, map_access access, void** data)
         {
+            if (!is_game_device(device)) {
+                return;
+            }
+
             if (!enabled.load() || data == nullptr || *data == nullptr || offset != 0 || access == map_access::read_only ||
                 !is_instance_buffer(device, resource)) {
                 return;
@@ -112,6 +116,10 @@ namespace edaa
 
         void on_unmap_buffer_region(device* device, resource resource)
         {
+            if (!is_game_device(device)) {
+                return;
+            }
+
             const std::lock_guard<std::mutex> lock(records_mutex);
             const auto it = mapped.find(resource.handle);
 

@@ -17,6 +17,18 @@ namespace edaa
     const char* const version = EDAA_VERSION;
 
 
+    std::wstring addon_folder()
+    {
+        HMODULE module = nullptr;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&addon_folder), &module);
+        wchar_t path[MAX_PATH] = {};
+        GetModuleFileNameW(module, path, MAX_PATH);
+        const std::wstring file(path);
+        return file.substr(0, file.find_last_of(L"\\/"));
+    }
+
+
     addon_state& state()
     {
         static addon_state instance;

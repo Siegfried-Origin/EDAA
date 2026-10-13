@@ -3,8 +3,9 @@
 A ReShade add-on that adds TAA (Temporal Anti-Aliasing) to Elite Dangerous
 Odyssey (DX11): sub-pixel jitter, motion vectors from the game's camera and
 depth, and a TAA resolve inserted into the game's frame before the cockpit
-HUD, bloom and tonemapping. On NVIDIA RTX GPUs, NVIDIA DLAA (DLSS at native
-resolution) can replace the EDAA TAA at the same point.
+HUD, bloom and tonemapping. NVIDIA DLAA (DLSS at native resolution, RTX
+GPUs) or Intel XeSS Native AA (any recent GPU, through a D3D12 bridge) can
+replace the EDAA TAA at the same point.
 
 * Website and download: https://siegfried-origin.github.io/EDAA/ (`docs/index.html`, GitHub Pages)
 * How it works, settings, diagnostics: [docs/addon.md](docs/addon.md)
@@ -28,14 +29,15 @@ It:
   add-ons). If it is missing, it offers to download the official
   `ReShade_Setup_6.8.0_Addon.exe` from reshade.me and run it silently for
   the game (API DirectX 10/11/12), or to open reshade.me;
-* copies `EDAA.addon64` and `nvngx_dlss.dll` (NVIDIA DLAA) next to
-  `dxgi.dll`.
+* copies `EDAA.addon64`, `nvngx_dlss.dll` (NVIDIA DLAA) and `libxess.dll`
+  (Intel XeSS) next to `dxgi.dll`.
 
 Then, in the game's graphics options, set anti-aliasing to off (the TAA
 replaces it). TAA is on by default; press `Home` for the ReShade overlay and
 open the "EDAA" tab to see its status or change settings (saved in
-`ReShade.ini`). `Ctrl+Shift+T` toggles it. With an NVIDIA RTX GPU, choose
-"Method: NVIDIA DLAA" there; without RTX, EDAA keeps its own TAA.
+`ReShade.ini`). `Ctrl+Shift+T` toggles it. "Method" there switches between
+the EDAA TAA, NVIDIA DLAA (RTX GPUs) and Intel XeSS (needs the Visual C++
+2015-2022 runtime); if the chosen one cannot run, EDAA keeps its own TAA.
 
 EDHM / 3DMigoto (`d3d11.dll`) can stay installed. ReShade warns that its
 add-on build is meant for single-player games; use it at your own
@@ -50,7 +52,8 @@ Game folder (Steam): `C:\Program Files (x86)\Steam\steamapps\common\Elite Danger
 2. Run it, select `EliteDangerous64.exe` in the game folder and the API
    **DirectX 10/11/12**. It installs `dxgi.dll` and `ReShade.ini`. Skip the
    effect packages (none are needed).
-3. Copy `EDAA.addon64` (and `nvngx_dlss.dll` for DLAA) next to `dxgi.dll`
+3. Copy `EDAA.addon64` (with `nvngx_dlss.dll` for DLAA, `libxess.dll` for
+   XeSS) next to `dxgi.dll`
    (from the release zip, a package
    made with `tools\package.ps1`, or `build\Release` after building, see
    [docs/addon.md](docs/addon.md)).
@@ -59,8 +62,8 @@ Game folder (Steam): `C:\Program Files (x86)\Steam\steamapps\common\Elite Danger
 ## Uninstall
 
 Installed with the installer: Windows Settings > Apps > "EDAA" (removes
-`EDAA.addon64` and `nvngx_dlss.dll`; ReShade stays). By hand: close the game
-and delete `EDAA.addon64` and `nvngx_dlss.dll` from the game folder.
+`EDAA.addon64`, `nvngx_dlss.dll` and `libxess.dll`; ReShade stays). By hand:
+close the game and delete these three files from the game folder.
 
 To remove ReShade too: run the ReShade setup and choose "Uninstall", or
 delete `dxgi.dll`, `ReShade.ini`, `ReShade.log` and the `reshade-shaders`
@@ -93,7 +96,9 @@ components below keep their own licenses.
 
 ## Third-party components
 
-ReShade (BSD 3-Clause), Dear ImGui (MIT) and the NVIDIA DLSS SDK (NVIDIA RTX
-SDKs license) are git submodules in `third_party/`; see
+ReShade (BSD 3-Clause), Dear ImGui (MIT), the NVIDIA DLSS SDK (NVIDIA RTX
+SDKs license) and the Intel XeSS SDK (Intel Simplified Software License)
+are git submodules in `third_party/`; see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). NVIDIA and DLSS are
-trademarks of NVIDIA Corporation; EDAA is not sponsored or endorsed by NVIDIA.
+trademarks of NVIDIA Corporation, Intel and XeSS of Intel Corporation; EDAA
+is not sponsored or endorsed by NVIDIA or Intel.

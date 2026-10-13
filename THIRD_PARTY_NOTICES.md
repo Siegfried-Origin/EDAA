@@ -295,6 +295,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ```
 
+## Intel XeSS SDK
+
+- Used for: Intel XeSS Native AA (`libxess.dll`, delay-loaded by
+  `EDAA.addon64`; headers under the MIT license).
+- License: Intel Simplified Software License (`licenses/Intel-XeSS-LICENSE.txt`),
+  third-party programs in `licenses/Intel-XeSS-third-party-programs.txt`.
+- Source: https://github.com/intel/xess
+- Intel(R) Xe Super Sampling (XeSS) SDK: Copyright (C) 2025 Intel Corporation.
+  Intel and XeSS are trademarks of Intel Corporation; EDAA is not sponsored
+  or endorsed by Intel.
+
 ## ReShade (add-on API headers, v6.8.0)
 
 - License: BSD 3-Clause (`licenses/ReShade-LICENSE.md`).

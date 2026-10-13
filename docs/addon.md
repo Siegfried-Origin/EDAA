@@ -80,6 +80,25 @@ Per frame, in the order the game draws:
    run (no RTX GPU, old driver, `nvngx_dlss.dll` missing next to the add-on),
    the TAA runs instead and the overlay line "DLSS:" says why. NGX logs go to
    `%LOCALAPPDATA%\EDAA`.
+6c. **Intel XeSS Native AA** (`xess.cpp`, "Method" in the overlay): XeSS
+   Super Resolution at 1.0x through a D3D12 bridge, because XeSS on D3D11
+   only runs on Intel Arc GPUs. A D3D12 device is created on the game's GPU;
+   colour, an R32_FLOAT depth copy and the motion vectors are copied into
+   textures shared with D3D11, a shared fence orders the work (D3D11 copies
+   -> signal -> D3D12 queue waits, runs XeSS, signals -> D3D11 waits), and
+   the shared output is copied back like the DLAA output. Same inputs and
+   conventions as DLAA (inverted depth, auto exposure, velocity scale =
+   render size, jitter in pixels). `libxess.dll` (78 MB) is delay-loaded
+   from the add-on folder and needs the Visual C++ 2015-2022 runtime; if it
+   cannot run, the TAA runs instead and the overlay line "XeSS:" says why.
+6d. **Which methods are offered**: at the first resolve (main menu), each
+   backend is probed once per device (`dlss::probe`: NGX init and
+   capabilities; `xess::probe`: libxess.dll, D3D12 bridge and XeSS context,
+   freed right after). The "Method" list shows all three; those that cannot
+   run are greyed out ("not available on this system") and cannot be
+   selected in the normal build. A saved method that cannot run falls back
+   to the TAA silently. Developer builds can select every method, with the
+   "DLSS:" / "XeSS:" line saying why one cannot run.
 7. **At Present** (`passes.cpp`, `capture.cpp`): optional debug view over the
    back buffer, auto capture, next jitter phase.
 
@@ -96,8 +115,9 @@ cmake -S . -B build -G "Visual Studio 18 2026" -A x64
 cmake --build build --config Release
 ```
 
-Output: `build\Release\EDAA.addon64` (static CRT) and, with DLSS,
-`build\Release\nvngx_dlss.dll` (both go into the game folder).
+Output: `build\Release\EDAA.addon64` (static CRT) and, with the SDKs,
+`build\Release\nvngx_dlss.dll` (DLAA) and `build\Release\libxess.dll` (XeSS),
+all three for the game folder. `-DEDAA_WITH_XESS=OFF` builds without XeSS.
 Dependencies are git submodules in `third_party/`, pinned to a version:
 ReShade (tag v6.8.0, add-on API headers), Dear ImGui (the commit ReShade
 6.8.0 uses) and the NVIDIA DLSS SDK (310.9.1). The DLSS repository is large

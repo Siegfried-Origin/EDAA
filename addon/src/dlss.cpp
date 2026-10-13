@@ -11,6 +11,7 @@
 
 #include "state.hpp"
 
+#include <atomic>
 #include <cstdio>
 #include <mutex>
 #include <string>
@@ -34,6 +35,7 @@ namespace edaa::dlss
         NVSDK_NGX_Parameter* params = nullptr;
         NVSDK_NGX_Handle* feature = nullptr;
         uint32_t feature_w = 0, feature_h = 0;
+        std::atomic<int> probed{ -1 }; // probe() result
         std::mutex status_mutex; // the overlay reads the status from its own thread
         std::string status_text = "not used yet";
 
@@ -53,26 +55,13 @@ namespace edaa::dlss
         }
 
 
-        // Folder of EDAA.addon64: nvngx_dlss.dll is installed next to it.
-        std::wstring module_folder()
-        {
-            HMODULE module = nullptr;
-            GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                reinterpret_cast<LPCWSTR>(&module_folder), &module);
-            wchar_t path[MAX_PATH] = {};
-            GetModuleFileNameW(module, path, MAX_PATH);
-            std::wstring folder(path);
-            return folder.substr(0, folder.find_last_of(L"\\/"));
-        }
-
-
         // NGX writes its logs there: %LOCALAPPDATA%\EDAA.
         std::wstring data_folder()
         {
             wchar_t base[MAX_PATH] = {};
 
             if (GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH) == 0) {
-                return module_folder();
+                return addon_folder();
             }
 
             std::wstring folder = std::wstring(base) + L"\\EDAA";
@@ -126,7 +115,7 @@ namespace edaa::dlss
 
             init_failed = true; // until everything below succeeds
 
-            std::wstring folder = module_folder();
+            std::wstring folder = addon_folder();
             wchar_t* paths[] = { folder.data() };
             NVSDK_NGX_FeatureCommonInfo info = {};
             info.PathListInfo.Path = paths;
@@ -227,7 +216,7 @@ namespace edaa::dlss
     }
 
 
-    bool evaluate(ID3D11Device* device, ID3D11DeviceContext* ctx, const inputs& in)
+    bool evaluate(ID3D11Device* device, ID3D11DeviceContext* ctx, const upscaler_inputs& in)
     {
         if (!init(device)) {
             return false;
@@ -268,6 +257,19 @@ namespace edaa::dlss
     }
 
 
+    void probe(ID3D11Device* device)
+    {
+        // NGX init and capability query only: the DLAA feature is created on first use.
+        probed = init(device) ? 1 : 0;
+    }
+
+
+    int availability()
+    {
+        return probed;
+    }
+
+
     std::string status()
     {
         const std::lock_guard<std::mutex> lock(status_mutex);
@@ -287,9 +289,20 @@ namespace edaa::dlss
 
 
 #else
-    bool evaluate(ID3D11Device*, ID3D11DeviceContext*, const inputs&)
+    bool evaluate(ID3D11Device*, ID3D11DeviceContext*, const upscaler_inputs&)
     {
         return false;
+    }
+
+
+    void probe(ID3D11Device*)
+    {
+    }
+
+
+    int availability()
+    {
+        return 0;
     }
 
 

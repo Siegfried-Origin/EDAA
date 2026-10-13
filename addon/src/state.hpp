@@ -27,13 +27,14 @@ namespace edaa
     {
         taa = 0, // EDAA TAA (taa.hlsl)
         dlaa = 1, // NVIDIA DLSS at native resolution (dlss.cpp); falls back to TAA if unavailable
+        xess = 2, // Intel XeSS Native AA through a D3D12 bridge (xess.cpp); falls back to TAA if unavailable
     };
 
 
     struct settings
     {
         int aa_method = 0; // aa_method
-        bool dlss_jitter_flip = false; // developer: negate the jitter passed to DLSS (sign convention check)
+        bool upscaler_jitter_flip = false; // developer: negate the jitter passed to DLSS/XeSS (sign convention check)
         bool jitter_enabled = true; // follows taa_enabled unless changed in developer builds
         int jitter_phases = 8; // Halton(2,3) sequence length
         float jitter_scale = 1.0f; // in pixels; > 1 only to make the effect obvious when testing
@@ -205,6 +206,18 @@ namespace edaa
     // Settings saved in ReShade.ini, section [EDAA] (settings.cpp).
     void load_settings(settings& config);
     void save_settings(const settings& config);
+
+
+    // True for the game's D3D11 device. ReShade also raises events for the D3D12
+    // device of the XeSS bridge: every event handler ignores those.
+    inline bool is_game_device(reshade::api::device* device)
+    {
+        return device != nullptr && device->get_api() == reshade::api::device_api::d3d11;
+    }
+
+
+    // Folder of EDAA.addon64 (the game folder): nvngx_dlss.dll and libxess.dll are next to it.
+    std::wstring addon_folder();
 
     // Build identification shown in the overlay and the log.
     extern const char* const build_stamp;

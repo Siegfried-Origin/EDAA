@@ -101,18 +101,30 @@ namespace edaa
 
         void on_init_command_list(command_list* cmd_list)
         {
+            if (!is_game_device(cmd_list->get_device())) {
+                return; // the XeSS bridge's D3D12 lists: no tracking (other handlers see no private data)
+            }
+
             cmd_list->create_private_data<context_state>();
         }
 
 
         void on_destroy_command_list(command_list* cmd_list)
         {
+            if (!is_game_device(cmd_list->get_device())) {
+                return;
+            }
+
             cmd_list->destroy_private_data<context_state>();
         }
 
 
-        void on_init_pipeline(device*, pipeline_layout, uint32_t count, const pipeline_subobject* subobjects, pipeline pipeline)
+        void on_init_pipeline(device* device, pipeline_layout, uint32_t count, const pipeline_subobject* subobjects, pipeline pipeline)
         {
+            if (!is_game_device(device)) {
+                return;
+            }
+
             for (uint32_t i = 0; i < count; ++i) {
                 if (subobjects[i].type == pipeline_subobject_type::pixel_shader && subobjects[i].data != nullptr) {
                     const auto& desc = *static_cast<const shader_desc*>(subobjects[i].data);
@@ -164,8 +176,12 @@ namespace edaa
         }
 
 
-        void on_destroy_pipeline(device*, pipeline pipeline)
+        void on_destroy_pipeline(device* device, pipeline pipeline)
         {
+            if (!is_game_device(device)) {
+                return;
+            }
+
             const std::lock_guard<std::mutex> lock(pipelines_mutex);
             depth_states.erase(pipeline.handle);
             resolve_shaders.erase(pipeline.handle);

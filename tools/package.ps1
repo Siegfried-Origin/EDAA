@@ -24,8 +24,10 @@ $name = "EDAA-" + (Get-Date -Format "yyyyMMdd-HHmm")
 $dir = Join-Path $root "dist\$name"
 New-Item -ItemType Directory -Force $dir | Out-Null
 Copy-Item build\Release\EDAA.addon64 $dir
-if (Test-Path build\Release\nvngx_dlss.dll) {
-    Copy-Item build\Release\nvngx_dlss.dll $dir # NVIDIA DLAA (release library)
+foreach ($dll in "nvngx_dlss.dll", "libxess.dll") { # NVIDIA DLAA, Intel XeSS
+    if (Test-Path "build\Release\$dll") {
+        Copy-Item "build\Release\$dll" $dir
+    }
 }
 
 $install = @'

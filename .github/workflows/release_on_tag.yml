@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # ReShade, ImGui and the DLSS SDK (shallow, at the pinned commits).
+          # ReShade, ImGui, the DLSS and XeSS SDKs (shallow, at the pinned commits).
           submodules: true
 
       - name: Version from tag
@@ -30,7 +30,8 @@ jobs:
       - name: Build add-on
         shell: pwsh
         run: |
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DEDAA_VERSION=${{ steps.version.outputs.version }}
+          # Quoted: PowerShell would split -DEDAA_VERSION=0.2.0 at the first dot.
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 "-DEDAA_VERSION=${{ steps.version.outputs.version }}"
           cmake --build build --config Release
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
@@ -50,10 +51,12 @@ jobs:
           # Add-on + DLSS library, README, notices and licenses.
           $zip = "installer\Output\zip"
           New-Item -ItemType Directory -Force "$zip\licenses" | Out-Null
-          Copy-Item build\Release\EDAA.addon64, build\Release\nvngx_dlss.dll, README.md, LICENSE, THIRD_PARTY_NOTICES.md $zip
+          Copy-Item build\Release\EDAA.addon64, build\Release\nvngx_dlss.dll, build\Release\libxess.dll, README.md, LICENSE, THIRD_PARTY_NOTICES.md $zip
           Copy-Item third_party\dlss\LICENSE.txt "$zip\licenses\NVIDIA-RTX-SDKs-LICENSE.txt"
           Copy-Item third_party\reshade\LICENSE.md "$zip\licenses\ReShade-LICENSE.md"
           Copy-Item third_party\imgui\LICENSE.txt "$zip\licenses\ImGui-LICENSE.txt"
+          Copy-Item third_party\xess\LICENSE.txt "$zip\licenses\Intel-XeSS-LICENSE.txt"
+          Copy-Item third_party\xess\third-party-programs.txt "$zip\licenses\Intel-XeSS-third-party-programs.txt"
           Compress-Archive -Path "$zip\*" -DestinationPath "installer\Output\EDAA-${{ steps.version.outputs.version }}.zip"
 
       - name: Publish release

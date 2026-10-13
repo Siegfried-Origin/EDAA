@@ -6,8 +6,10 @@
 // camera decoding and diagnostics. Every change is saved to ReShade.ini.
 
 #include "dlss.hpp"
+#include "xess.hpp"
 #include "state.hpp"
 
+#include <cstdio>
 #include <cstring>
 
 namespace edaa
@@ -34,14 +36,54 @@ namespace edaa
                 s.config.jitter_enabled = s.config.taa_enabled;
             }
 
-            if (edit(ImGui::Combo("Method", &s.config.aa_method, "EDAA TAA\0NVIDIA DLAA (DLSS at native resolution)\0"))) {
-                s.history_reset = true;
+            // Every method is listed; those that cannot run on this system are greyed
+            // out (developer builds can still select them, to see why they fail).
+            struct choice
+            {
+                aa_method method;
+                const char* name;
+                int availability; // -1 not checked yet, 0 no, 1 yes
+            };
+            const choice choices[] = {
+                { aa_method::taa, "EDAA TAA", 1 },
+                { aa_method::dlaa, "NVIDIA DLAA (DLSS at native resolution)", dlss::availability() },
+                { aa_method::xess, "Intel XeSS (Native AA)", xess::availability() },
+            };
+            // A saved method that cannot run is replaced by the TAA (passes.cpp).
+            const choice* shown = &choices[0];
+
+            for (const choice& c : choices) {
+                if (s.config.aa_method == static_cast<int>(c.method) && (c.availability == 1 || EDAA_DEVELOPER)) {
+                    shown = &c;
+                }
+            }
+
+            if (ImGui::BeginCombo("Method", shown->name)) {
+                for (const choice& c : choices) {
+                    const bool usable = c.availability == 1 || EDAA_DEVELOPER;
+                    char label[96];
+                    snprintf(label, sizeof(label), "%s%s", c.name,
+                        c.availability == 1 ? "" : c.availability == 0 ? " - not available on this system"
+                                                                       : " - checking...");
+
+                    if (ImGui::Selectable(label, &c == shown, usable ? 0 : ImGuiSelectableFlags_Disabled) &&
+                        s.config.aa_method != static_cast<int>(c.method)) {
+                        s.config.aa_method = static_cast<int>(c.method);
+                        s.history_reset = true;
+                        edit.changed = true;
+                    }
+                }
+
+                ImGui::EndCombo();
             }
 
             ImGui::Text("Status: %s", s.config.taa_enabled ? s.motion_status : "off");
 
-            if (s.config.aa_method == static_cast<int>(aa_method::dlaa)) {
+            if (s.config.aa_method == static_cast<int>(aa_method::dlaa) && (EDAA_DEVELOPER || dlss::availability() == 1)) {
                 ImGui::Text("DLSS: %s", dlss::status().c_str());
+            }
+            else if (s.config.aa_method == static_cast<int>(aa_method::xess) && (EDAA_DEVELOPER || xess::availability() == 1)) {
+                ImGui::Text("XeSS: %s", xess::status().c_str());
             }
 
             if (s.map_mode) {
@@ -148,7 +190,7 @@ namespace edaa
             edit(ImGui::SliderInt("Halton phases", &s.config.jitter_phases, 1, 32));
             edit(ImGui::SliderFloat("Amplitude (pixels)", &s.config.jitter_scale, 1.0f, 16.0f, "%.1f"));
             edit(ImGui::Checkbox("Jitter decals, light volumes and glows (off: they z-fight and flicker)", &s.config.jitter_overlay_draws));
-            edit(ImGui::Checkbox("DLSS: negate the jitter offset (sign convention check)", &s.config.dlss_jitter_flip));
+            edit(ImGui::Checkbox("DLSS/XeSS: negate the jitter offset (sign convention check)", &s.config.upscaler_jitter_flip));
             ImGui::Text("Current offset: %+.3f, %+.3f px", s.jitter_x, s.jitter_y);
             ImGui::Text("Last frame: %u of %u scene draws jittered", s.last.jittered_draws, s.last.scene_draws);
 

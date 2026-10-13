@@ -122,6 +122,10 @@ namespace edaa
 
         void on_map_buffer_region(device* device, resource resource, uint64_t offset, uint64_t size, map_access access, void** data)
         {
+            if (!is_game_device(device)) {
+                return;
+            }
+
             if (data == nullptr || *data == nullptr || access == map_access::read_only || !is_large_constant_buffer(device, resource)) {
                 return;
             }
@@ -141,8 +145,12 @@ namespace edaa
         }
 
 
-        void on_unmap_buffer_region(device*, resource resource)
+        void on_unmap_buffer_region(device* device, resource resource)
         {
+            if (!is_game_device(device)) {
+                return;
+            }
+
             void* data;
             {
                 const std::lock_guard<std::mutex> lock(mapped_mutex);
@@ -162,6 +170,10 @@ namespace edaa
 
         bool on_update_buffer_region(device* device, const void* data, resource dest, uint64_t dest_offset, uint64_t size)
         {
+            if (!is_game_device(device)) {
+                return false;
+            }
+
             if (data == nullptr || !is_large_constant_buffer(device, dest)) {
                 return false;
             }

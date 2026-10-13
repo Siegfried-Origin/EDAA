@@ -6,7 +6,7 @@
 ;   whether it is the build with full add-on support. If needed, offers to
 ;   download the official ReShade setup from reshade.me and run it silently
 ;   for the game (API DXGI), or to open reshade.me.
-; - Copies EDAA.addon64 next to dxgi.dll, and nvngx_dlss.dll (NVIDIA DLAA)
+; - Copies EDAA.addon64 next to dxgi.dll, with nvngx_dlss.dll (NVIDIA DLAA) and libxess.dll (Intel XeSS)
 ;   when the build has it. The uninstaller, README, third-party notices and
 ;   licenses go to Program Files\EDAA (the game folder already has Frontier's
 ;   unins000.exe). Uninstalling removes them all; ReShade stays.
@@ -22,6 +22,9 @@
 #endif
 #ifndef DlssFile
   #define DlssFile "..\build\Release\nvngx_dlss.dll"
+#endif
+#ifndef XessFile
+  #define XessFile "..\build\Release\libxess.dll"
 #endif
 #define AppName "EDAA"
 #define AppPublisher "Siegfried Origin"
@@ -66,12 +69,18 @@ Source: "{#AddonFile}"; DestDir: "{app}"; Flags: ignoreversion
 ; Release DLSS library (NVIDIA RTX SDKs license), loaded by the add-on for DLAA.
 Source: "{#DlssFile}"; DestDir: "{app}"; Flags: ignoreversion
 #endif
+#if FileExists(AddBackslash(SourcePath) + XessFile)
+; XeSS library (Intel Simplified Software License), delay-loaded by the add-on for XeSS.
+Source: "{#XessFile}"; DestDir: "{app}"; Flags: ignoreversion
+#endif
 Source: "..\README.md"; DestDir: "{autopf}\EDAA"; Flags: ignoreversion
 Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{autopf}\EDAA"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{autopf}\EDAA"; DestName: "LICENSE.txt"; Flags: ignoreversion
 Source: "..\third_party\dlss\LICENSE.txt"; DestDir: "{autopf}\EDAA\licenses"; DestName: "NVIDIA-RTX-SDKs-LICENSE.txt"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\third_party\reshade\LICENSE.md"; DestDir: "{autopf}\EDAA\licenses"; DestName: "ReShade-LICENSE.md"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\third_party\imgui\LICENSE.txt"; DestDir: "{autopf}\EDAA\licenses"; DestName: "ImGui-LICENSE.txt"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\third_party\xess\LICENSE.txt"; DestDir: "{autopf}\EDAA\licenses"; DestName: "Intel-XeSS-LICENSE.txt"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\third_party\xess\third-party-programs.txt"; DestDir: "{autopf}\EDAA\licenses"; DestName: "Intel-XeSS-third-party-programs.txt"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Code]
 const
@@ -423,7 +432,7 @@ end;
 function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfo, MemoTypeInfo, MemoComponentsInfo, MemoGroupInfo, MemoTasksInfo: String): String;
 begin
   Result := 'Game folder:' + NewLine + Space + GamePath + NewLine + NewLine +
-    'Files:' + NewLine + Space + 'EDAA.addon64 and nvngx_dlss.dll (next to dxgi.dll)' + NewLine + NewLine +
+    'Files:' + NewLine + Space + 'EDAA.addon64, nvngx_dlss.dll and libxess.dll (next to dxgi.dll)' + NewLine + NewLine +
     'ReShade:' + NewLine + Space + ReShadeStatusText();
   if ReShadeState <> 'ok' then
   begin

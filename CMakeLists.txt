@@ -62,6 +62,7 @@ add_library(edaa SHARED
 	addon/src/capture.cpp
 	addon/src/settings.cpp
 	addon/src/dlss.cpp
+	addon/src/xess.cpp
 	${SHADER_HEADER}
 	${TAA_HEADER}
 )
@@ -90,6 +91,22 @@ if(EDAA_WITH_DLSS AND EXISTS ${DLSS_DIR}/include/nvsdk_ngx_helpers.h)
 else()
 	target_compile_definitions(edaa PRIVATE EDAA_DLSS=0)
 	message(STATUS "Building without DLSS (EDAA_WITH_DLSS off or SDK not in third_party/dlss)")
+endif()
+# Intel XeSS (Native AA through a D3D12 bridge): built in when the SDK submodule
+# third_party/xess is checked out. libxess.dll is delay-loaded, so the add-on
+# still loads without it (or on systems where it cannot load).
+option(EDAA_WITH_XESS "Build with Intel XeSS when the SDK is present" ON)
+set(XESS_DIR ${CMAKE_SOURCE_DIR}/third_party/xess)
+if(EDAA_WITH_XESS AND EXISTS ${XESS_DIR}/inc/xess/xess_d3d12.h)
+	target_include_directories(edaa SYSTEM PRIVATE ${XESS_DIR}/inc)
+	target_link_libraries(edaa PRIVATE ${XESS_DIR}/lib/libxess.lib d3d12.lib delayimp.lib)
+	target_link_options(edaa PRIVATE /DELAYLOAD:libxess.dll /DELAYLOAD:d3d12.dll)
+	target_compile_definitions(edaa PRIVATE EDAA_XESS=1)
+	add_custom_command(TARGET edaa POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different ${XESS_DIR}/bin/libxess.dll $<TARGET_FILE_DIR:edaa>)
+else()
+	target_compile_definitions(edaa PRIVATE EDAA_XESS=0)
+	message(STATUS "Building without XeSS (EDAA_WITH_XESS off or SDK not in third_party/xess)")
 endif()
 # C4702 (unreachable code) is reported by the optimizer inside reshade_overlay.hpp.
 target_compile_options(edaa PRIVATE /W4 /permissive- /utf-8 /wd4702)
