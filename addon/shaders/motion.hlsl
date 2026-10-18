@@ -9,8 +9,10 @@ cbuffer motion_constants : register(b0)
     float4 camera_delta; // xyz: current camera position - previous (c275)
     float4 params; // xy: jitter in UV, z: near plane, w: vehicle mask distance (m)
     float4 render_size; // w, h, 1/w, 1/h
-    float4 debug; // x: mode (1 motion, 2 mask, 3 depth, 4 history rejection, 5 objects, 6 temporal change), y: pixels for full colour,
+    float4 debug; // x: mode (1 motion, 2 mask, 3 depth, 4 history rejection, 5 objects, 6 temporal change, 7 HUD mask), y: pixels for full colour,
                   // z: vehicle mask source (0 stencil bits, 1 distance), w: stencil bits of the player's vehicle
+    float4 vehicle[3]; // rows of the vehicle motion: current -> previous camera-relative position (3x4)
+    float4 vehicle_on; // x: 1 when the vehicle motion is known, else vehicle pixels get no motion
 };
 
 // Moving objects debug view (object_motion.cpp), up to 128 markers.
@@ -73,8 +75,23 @@ motion_output ps_motion(float4 pos : SV_Position)
         motion = float2(prev_ndc.x * 0.5 + 0.5, 0.5 - prev_ndc.y * 0.5) - uv;
     }
 
-    // Vehicle-attached pixels move with the camera: zero camera-relative motion.
-    o.motion = o.mask > 0 ? 0 : motion;
+    // Vehicle pixels: the vehicle's own motion (head movements included), or
+    // none when it is unknown (they mostly move with the camera).
+    if (o.mask > 0) {
+        motion = 0;
+
+        if (vehicle_on.x > 0 && h.w > 0) {
+            const float4 p = float4(h.xyz / h.w, 1);
+            const float4 vehicle_clip = mul(float4(dot(vehicle[0], p), dot(vehicle[1], p), dot(vehicle[2], p), 1), prev_view_proj);
+
+            if (vehicle_clip.w > 0) {
+                const float2 prev_ndc = vehicle_clip.xy / vehicle_clip.w;
+                motion = float2(prev_ndc.x * 0.5 + 0.5, 0.5 - prev_ndc.y * 0.5) - uv;
+            }
+        }
+    }
+
+    o.motion = motion;
     return o;
 }
 
@@ -92,9 +109,10 @@ float4 ps_debug(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
         return float4(saturate(0.5 + 0.5 * m), 0.5, 1);
     }
 
-    if (debug.x == 2) {
+    if (debug.x == 2 || debug.x == 7) {
+        // 2: vehicle mask (orange), 7: HUD mask of the upscaling (cyan), both bound to t2.
         const float mask = mask_tex.Load(int3(px, 0));
-        return float4(lerp(depth_shade.xxx * 0.5, float3(1, 0.3, 0.1), mask), 1);
+        return float4(lerp(depth_shade.xxx * 0.5, debug.x == 2 ? float3(1, 0.3, 0.1) : float3(0.1, 0.9, 1), mask), 1);
     }
 
     if (debug.x == 5) {

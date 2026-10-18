@@ -200,6 +200,34 @@ float4 ps_taa(float4 pos : SV_Position) : SV_Target
 }
 
 
+// HUD mask for upscaling: 1 where the scene changed a lot between the snapshot
+// (t1: at the resolve point, taken again after each fullscreen pass such as
+// the helmet visor) and now (t0): the cockpit HUD and holograms. A pixel counts
+// only when what was added is at least half as bright as what was under it,
+// so faint glows do not cost it its history. Dilated by one pixel to cover the
+// edges once upscaled.
+float ps_hud_mask(float4 pos : SV_Position) : SV_Target
+{
+    float changed = 0;
+
+    // clang-format off
+    [unroll] for (int y = -1; y <= 1; ++y) {
+        [unroll] for (int x = -1; x <= 1; ++x) {
+            // Out of bounds loads return 0 in both: no change.
+            const int3 p = int3(int2(pos.xy) + int2(x, y), 0);
+            const float3 before = history_tex.Load(p).rgb;
+            const float3 diff = abs(scene_color.Load(p) - before);
+            const float added = max(diff.r, max(diff.g, diff.b));
+            const float under = max(before.r, max(before.g, before.b));
+            changed = max(changed, added > 0.5 * under + 1e-4 ? 1.0 : 0.0);
+        }
+    }
+    // clang-format on
+
+    return changed;
+}
+
+
 // Copies the resolved image back into the game's scene target.
 float3 ps_copy(float4 pos : SV_Position) : SV_Target
 {

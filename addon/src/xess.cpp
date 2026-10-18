@@ -1,4 +1,11 @@
-// Intel XeSS (Native AA) through a D3D12 bridge. See xess.hpp and docs/addon.md.
+// Intel XeSS through a D3D12 bridge. See xess.hpp and docs/addon.md.
+//
+// Two uses, one XeSS context (initialised again when sizes, mode or flags change):
+//   - Native AA (evaluate): HDR scene at the resolve point, render size = output size;
+//   - upscaling (upscale): the game's tonemapped image at the end of the frame,
+//     render size -> display size, quality preset whose input range
+//     (xessGetOptimalInputResolution) contains the render size, the cockpit
+//     HUD mask as responsive pixel mask.
 //
 // Per frame, on the game's immediate D3D11 context and a D3D12 queue of our
 // own on the same GPU:
@@ -36,8 +43,25 @@ namespace edaa::xess
     namespace
     {
         std::atomic<int> probed{ -1 }; // probe() result
-        std::mutex status_mutex; // the overlay reads the status from its own thread
+        std::mutex status_mutex; // the overlay reads the status and info from its own thread
         std::string status_text = "not used yet";
+        upscale_info last_info;
+        uint32_t info_w = 0, info_h = 0; // display size of last_info
+
+        struct quality_mode
+        {
+            xess_quality_settings_t value;
+            const char* name;
+        };
+
+        const quality_mode scaling_modes[] = {
+            { XESS_QUALITY_SETTING_ULTRA_QUALITY_PLUS, "Ultra Quality Plus" },
+            { XESS_QUALITY_SETTING_ULTRA_QUALITY, "Ultra Quality" },
+            { XESS_QUALITY_SETTING_QUALITY, "Quality" },
+            { XESS_QUALITY_SETTING_BALANCED, "Balanced" },
+            { XESS_QUALITY_SETTING_PERFORMANCE, "Performance" },
+            { XESS_QUALITY_SETTING_ULTRA_PERFORMANCE, "Ultra Performance" },
+        };
 
 
         void set_status(const std::string& text)
@@ -94,6 +118,17 @@ namespace edaa::xess
         };
 
 
+        // What the shared textures and the XeSS initialisation were made for.
+        struct setup
+        {
+            uint32_t in_w = 0, in_h = 0, out_w = 0, out_h = 0;
+            int quality = 0;
+            uint32_t flags = 0;
+
+            bool operator==(const setup&) const = default;
+        };
+
+
         struct bridge
         {
             ID3D11Device* device11 = nullptr; // the game's device, not owned
@@ -109,8 +144,9 @@ namespace edaa::xess
             uint64_t allocator_done[2] = {}; // fence value after which each allocator can be reset
             uint32_t frame = 0;
 
-            shared_texture color, depth, motion, output;
-            uint32_t width = 0, height = 0;
+            shared_texture color, depth, motion, output, mask;
+            ComPtr<ID3D11RenderTargetView> mask_rtv; // clears the mask when there is no HUD mask this frame
+            setup current;
             xess_context_handle_t context = nullptr;
         };
 
@@ -141,6 +177,7 @@ namespace edaa::xess
             }
 
             b = {};
+            info_w = info_h = 0;
         }
 
 
@@ -251,11 +288,11 @@ namespace edaa::xess
 
         // Created by D3D11 (shared NT handle) and opened by D3D12: the direction
         // drivers support best (D3D11 refused D3D12-created textures with E_INVALIDARG).
-        bool create_shared(const char* name, DXGI_FORMAT format, UINT bind_flags, shared_texture& t)
+        bool create_shared(const char* name, uint32_t width, uint32_t height, DXGI_FORMAT format, UINT bind_flags, shared_texture& t)
         {
             D3D11_TEXTURE2D_DESC desc = {};
-            desc.Width = b.width;
-            desc.Height = b.height;
+            desc.Width = width;
+            desc.Height = height;
             desc.MipLevels = 1;
             desc.ArraySize = 1;
             desc.Format = format;
@@ -284,41 +321,46 @@ namespace edaa::xess
         }
 
 
-        // Shared textures and XeSS initialisation for the render size.
-        bool resize(uint32_t width, uint32_t height)
+        // Shared textures and XeSS initialisation for these sizes, mode and flags.
+        bool resize(const setup& want)
         {
-            if (b.width == width && b.height == height && b.output.d3d11) {
+            if (b.current == want && b.output.d3d11) {
                 return true;
             }
 
             wait_for(b.fence_value); // XeSS must be idle before it is initialised again
-            b.color = b.depth = b.motion = b.output = {};
-            b.width = width;
-            b.height = height;
+            b.color = b.depth = b.motion = b.output = b.mask = {};
+            b.mask_rtv.Reset();
+            b.current = {};
+            const bool ldr = (want.flags & XESS_INIT_FLAG_LDR_INPUT_COLOR) != 0;
+            const bool masked = (want.flags & XESS_INIT_FLAG_RESPONSIVE_PIXEL_MASK) != 0;
 
-            if (!create_shared("colour", DXGI_FORMAT_R11G11B10_FLOAT, 0, b.color) ||
-                !create_shared("depth", DXGI_FORMAT_R32_FLOAT, 0, b.depth) ||
-                !create_shared("motion", DXGI_FORMAT_R16G16_FLOAT, 0, b.motion) ||
-                !create_shared("output", DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_UNORDERED_ACCESS, b.output)) {
-                b.width = b.height = 0;
+            if (!create_shared("colour", want.in_w, want.in_h, ldr ? DXGI_FORMAT_R8G8B8A8_UNORM : DXGI_FORMAT_R11G11B10_FLOAT, 0, b.color) ||
+                !create_shared("depth", want.in_w, want.in_h, DXGI_FORMAT_R32_FLOAT, 0, b.depth) ||
+                !create_shared("motion", want.in_w, want.in_h, DXGI_FORMAT_R16G16_FLOAT, 0, b.motion) ||
+                !create_shared("output", want.out_w, want.out_h, ldr ? DXGI_FORMAT_R8G8B8A8_UNORM : DXGI_FORMAT_R16G16B16A16_FLOAT,
+                    D3D11_BIND_UNORDERED_ACCESS, b.output) ||
+                (masked &&
+                    (!create_shared("mask", want.in_w, want.in_h, DXGI_FORMAT_R8_UNORM, 0, b.mask) ||
+                        failed("cannot create the mask view", b.device11->CreateRenderTargetView(b.mask.d3d11.Get(), nullptr, &b.mask_rtv))))) {
                 return false;
             }
 
-            // Native AA (1.0x), HDR colour before exposure (auto exposure),
-            // reverse-Z depth, motion vectors at render size (in UV: scaled to pixels).
+            // Reverse-Z depth, motion vectors at render size (in UV: scaled to pixels).
             xess_d3d12_init_params_t params = {};
-            params.outputResolution = { width, height };
-            params.qualitySetting = XESS_QUALITY_SETTING_AA;
-            params.initFlags = XESS_INIT_FLAG_INVERTED_DEPTH | XESS_INIT_FLAG_ENABLE_AUTOEXPOSURE;
+            params.outputResolution = { want.out_w, want.out_h };
+            params.qualitySetting = static_cast<xess_quality_settings_t>(want.quality);
+            params.initFlags = want.flags;
 
             if (failed("XeSS initialisation failed", xessD3D12Init(b.context, &params)) ||
-                failed("XeSS velocity scale", xessSetVelocityScale(b.context, static_cast<float>(width), static_cast<float>(height)))) {
-                b.width = b.height = 0;
+                failed("XeSS velocity scale", xessSetVelocityScale(b.context, static_cast<float>(want.in_w), static_cast<float>(want.in_h)))) {
                 return false;
             }
 
-            char text[96];
-            snprintf(text, sizeof(text), "EDAA: XeSS Native AA initialised for %ux%u", width, height);
+            b.current = want;
+            char text[128];
+            snprintf(text, sizeof(text), "EDAA: XeSS initialised, %ux%u -> %ux%u, quality %d", want.in_w, want.in_h, want.out_w, want.out_h,
+                want.quality);
             reshade::log::message(reshade::log::level::info, text);
             return true;
         }
@@ -340,82 +382,239 @@ namespace edaa::xess
         {
             const D3D12_RESOURCE_STATES input = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
             const D3D12_RESOURCE_STATES common = D3D12_RESOURCE_STATE_COMMON;
-            D3D12_RESOURCE_BARRIER barriers[4];
+            D3D12_RESOURCE_BARRIER barriers[5];
             transition(b.color.d3d12.Get(), to_xess ? common : input, to_xess ? input : common, barriers[0]);
             transition(b.depth.d3d12.Get(), to_xess ? common : input, to_xess ? input : common, barriers[1]);
             transition(b.motion.d3d12.Get(), to_xess ? common : input, to_xess ? input : common, barriers[2]);
             transition(b.output.d3d12.Get(), to_xess ? common : D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                 to_xess ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : common, barriers[3]);
-            b.list->ResourceBarrier(4, barriers);
+
+            if (b.mask.d3d12) {
+                transition(b.mask.d3d12.Get(), to_xess ? common : input, to_xess ? input : common, barriers[4]);
+            }
+
+            b.list->ResourceBarrier(b.mask.d3d12 ? 5 : 4, barriers);
+        }
+
+
+        // Initialised for 'want' (once), then one XeSS execution on 'in'.
+        bool run(ID3D11Device* device, ID3D11DeviceContext* ctx, const upscaler_inputs& in, const setup& want)
+        {
+            if (!init(device)) {
+                return false;
+            }
+
+            if (!resize(want)) {
+                shutdown(); // keep the error in the status, do not retry every frame
+                init_failed = true;
+                return false;
+            }
+
+            ComPtr<ID3D11DeviceContext4> ctx4;
+
+            if (failed("Windows 10 1703 or newer needed (ID3D11DeviceContext4)", ctx->QueryInterface(IID_PPV_ARGS(&ctx4)))) {
+                return false;
+            }
+
+            // 1. D3D11: inputs into the shared textures, then hand over to D3D12.
+            ctx->CopyResource(b.color.d3d11.Get(), in.color);
+            ctx->CopyResource(b.depth.d3d11.Get(), in.depth);
+            ctx->CopyResource(b.motion.d3d11.Get(), in.motion);
+
+            if (b.mask.d3d11 && in.hud_mask != nullptr) {
+                ctx->CopyResource(b.mask.d3d11.Get(), in.hud_mask);
+            }
+            else if (b.mask_rtv) {
+                const float none[4] = {};
+                ctx->ClearRenderTargetView(b.mask_rtv.Get(), none);
+            }
+
+            const uint64_t inputs_ready = ++b.fence_value;
+            ctx4->Signal(b.fence11.Get(), inputs_ready);
+            ctx->Flush();
+
+            // 2. D3D12: XeSS on our queue, after the D3D11 copies.
+            const uint32_t slot = b.frame++ % 2;
+            wait_for(b.allocator_done[slot]);
+            b.allocators[slot]->Reset();
+            b.list->Reset(b.allocators[slot].Get(), nullptr);
+            transitions(true);
+
+            xess_d3d12_execute_params_t params = {};
+            params.pColorTexture = b.color.d3d12.Get();
+            params.pVelocityTexture = b.motion.d3d12.Get();
+            params.pDepthTexture = b.depth.d3d12.Get();
+            params.pOutputTexture = b.output.d3d12.Get();
+            params.pResponsivePixelMaskTexture = b.mask.d3d12.Get();
+            params.jitterOffsetX = in.jitter_x;
+            params.jitterOffsetY = in.jitter_y;
+            params.exposureScale = 1.0f;
+            params.resetHistory = in.reset ? 1 : 0;
+            params.inputWidth = in.width;
+            params.inputHeight = in.height;
+            const xess_result_t result = xessD3D12Execute(b.context, b.list.Get(), &params);
+
+            transitions(false);
+            b.list->Close();
+            b.queue->Wait(b.fence12.Get(), inputs_ready);
+            ID3D12CommandList* const lists[] = { b.list.Get() };
+            b.queue->ExecuteCommandLists(1, lists);
+            const uint64_t output_ready = ++b.fence_value;
+            b.queue->Signal(b.fence12.Get(), output_ready);
+            b.allocator_done[slot] = output_ready;
+
+            // 3. D3D11: wait for XeSS on the GPU, take the output.
+            ctx4->Wait(b.fence11.Get(), output_ready);
+
+            if (failed("XeSS execution failed", result)) {
+                return false;
+            }
+
+            ctx->CopyResource(in.output, b.output.d3d11.Get());
+            return true;
+        }
+
+
+        // Input ranges of every quality preset for a display size (cached per size).
+        const upscale_info& modes_for(uint32_t display_w, uint32_t display_h)
+        {
+            if (info_w == display_w && info_h == display_h) {
+                return last_info;
+            }
+
+            upscale_info info;
+            const xess_2d_t output = { display_w, display_h };
+
+            for (const quality_mode& m : scaling_modes) {
+                xess_2d_t optimal = {}, low = {}, high = {};
+
+                if (xessGetOptimalInputResolution(b.context, &output, m.value, &optimal, &low, &high) < XESS_RESULT_SUCCESS || optimal.x == 0) {
+                    continue;
+                }
+
+                upscale_mode mode;
+                mode.name = m.name;
+                mode.optimal_w = optimal.x;
+                mode.optimal_h = optimal.y;
+                mode.min_w = low.x;
+                mode.min_h = low.y;
+                mode.max_w = high.x;
+                mode.max_h = high.y;
+                info.modes.push_back(mode);
+                char text[192];
+                snprintf(text, sizeof(text), "EDAA: XeSS %s for %ux%u: optimal %ux%u, range %ux%u - %ux%u", m.name, display_w, display_h,
+                    optimal.x, optimal.y, low.x, low.y, high.x, high.y);
+                reshade::log::message(reshade::log::level::info, text);
+            }
+
+            const std::lock_guard<std::mutex> lock(status_mutex);
+            last_info = info;
+            info_w = display_w;
+            info_h = display_h;
+            return last_info;
         }
     }
 
 
     bool evaluate(ID3D11Device* device, ID3D11DeviceContext* ctx, const upscaler_inputs& in)
     {
+        // Native AA (1.0x), HDR colour before exposure (auto exposure), reverse-Z depth.
+        setup want;
+        want.in_w = want.out_w = in.width;
+        want.in_h = want.out_h = in.height;
+        want.quality = XESS_QUALITY_SETTING_AA;
+        want.flags = XESS_INIT_FLAG_INVERTED_DEPTH | XESS_INIT_FLAG_ENABLE_AUTOEXPOSURE;
+
+        if (!run(device, ctx, in, want)) {
+            return false;
+        }
+
+        set_status("running (Native AA, D3D12 bridge)");
+        return true;
+    }
+
+
+    bool upscale(ID3D11Device* device, ID3D11DeviceContext* ctx, const upscaler_inputs& in)
+    {
         if (!init(device)) {
             return false;
         }
 
-        if (!resize(in.width, in.height)) {
-            shutdown(); // keep the error in the status, do not retry every frame
-            init_failed = true;
+        // The preset whose input range contains the render size, closest to its
+        // optimal size; else the one with the closest optimal size.
+        const uint32_t flags = XESS_INIT_FLAG_INVERTED_DEPTH | XESS_INIT_FLAG_LDR_INPUT_COLOR | XESS_INIT_FLAG_RESPONSIVE_PIXEL_MASK;
+
+        if (modes_for(in.output_width, in.output_height).modes.empty() && b.current.out_w == 0) {
+            // The ranges may need an initialised context: a first one for the Quality preset.
+            setup first = { in.width, in.height, in.output_width, in.output_height, XESS_QUALITY_SETTING_QUALITY, flags };
+
+            if (!resize(first)) {
+                return false;
+            }
+
+            info_w = info_h = 0;
+        }
+
+        const upscale_info& modes = modes_for(in.output_width, in.output_height);
+        int best = -1, closest = -1;
+        uint32_t best_distance = UINT32_MAX, closest_distance = UINT32_MAX;
+
+        for (size_t i = 0; i < modes.modes.size(); ++i) {
+            const upscale_mode& m = modes.modes[i];
+            const uint32_t distance = in.width > m.optimal_w ? in.width - m.optimal_w : m.optimal_w - in.width;
+
+            if (distance < closest_distance) {
+                closest_distance = distance;
+                closest = static_cast<int>(i);
+            }
+
+            if (in.width >= m.min_w && in.width <= m.max_w && in.height >= m.min_h && in.height <= m.max_h && distance < best_distance) {
+                best_distance = distance;
+                best = static_cast<int>(i);
+            }
+        }
+
+        best = best >= 0 ? best : closest;
+
+        if (best < 0) {
+            set_status("XeSS offers no upscaling preset for this display size");
             return false;
         }
 
-        ComPtr<ID3D11DeviceContext4> ctx4;
+        const upscale_mode& mode = modes.modes[best];
+        int quality = XESS_QUALITY_SETTING_QUALITY;
 
-        if (failed("Windows 10 1703 or newer needed (ID3D11DeviceContext4)", ctx->QueryInterface(IID_PPV_ARGS(&ctx4)))) {
+        for (const quality_mode& m : scaling_modes) {
+            quality = m.name == mode.name ? m.value : quality;
+        }
+
+        // Tonemapped image, reverse-Z depth, the cockpit HUD as responsive pixels.
+        setup want;
+        want.in_w = in.width;
+        want.in_h = in.height;
+        want.out_w = in.output_width;
+        want.out_h = in.output_height;
+        want.quality = quality;
+        want.flags = flags;
+
+        if (!run(device, ctx, in, want)) {
             return false;
         }
 
-        // 1. D3D11: inputs into the shared textures, then hand over to D3D12.
-        ctx->CopyResource(b.color.d3d11.Get(), in.color);
-        ctx->CopyResource(b.depth.d3d11.Get(), in.depth);
-        ctx->CopyResource(b.motion.d3d11.Get(), in.motion);
-        const uint64_t inputs_ready = ++b.fence_value;
-        ctx4->Signal(b.fence11.Get(), inputs_ready);
-        ctx->Flush();
-
-        // 2. D3D12: XeSS on our queue, after the D3D11 copies.
-        const uint32_t slot = b.frame++ % 2;
-        wait_for(b.allocator_done[slot]);
-        b.allocators[slot]->Reset();
-        b.list->Reset(b.allocators[slot].Get(), nullptr);
-        transitions(true);
-
-        xess_d3d12_execute_params_t params = {};
-        params.pColorTexture = b.color.d3d12.Get();
-        params.pVelocityTexture = b.motion.d3d12.Get();
-        params.pDepthTexture = b.depth.d3d12.Get();
-        params.pOutputTexture = b.output.d3d12.Get();
-        params.jitterOffsetX = in.jitter_x;
-        params.jitterOffsetY = in.jitter_y;
-        params.exposureScale = 1.0f;
-        params.resetHistory = in.reset ? 1 : 0;
-        params.inputWidth = in.width;
-        params.inputHeight = in.height;
-        const xess_result_t result = xessD3D12Execute(b.context, b.list.Get(), &params);
-
-        transitions(false);
-        b.list->Close();
-        b.queue->Wait(b.fence12.Get(), inputs_ready);
-        ID3D12CommandList* const lists[] = { b.list.Get() };
-        b.queue->ExecuteCommandLists(1, lists);
-        const uint64_t output_ready = ++b.fence_value;
-        b.queue->Signal(b.fence12.Get(), output_ready);
-        b.allocator_done[slot] = output_ready;
-
-        // 3. D3D11: wait for XeSS on the GPU, take the output.
-        ctx4->Wait(b.fence11.Get(), output_ready);
-
-        if (failed("XeSS execution failed", result)) {
-            return false;
+        {
+            const std::lock_guard<std::mutex> lock(status_mutex);
+            last_info.mode = mode.name;
         }
 
-        ctx->CopyResource(in.output, b.output.d3d11.Get());
-        set_status("running (D3D12 bridge)");
+        set_status(std::string("running (upscaling, ") + mode.name + ", D3D12 bridge)");
         return true;
+    }
+
+
+    upscale_info info()
+    {
+        const std::lock_guard<std::mutex> lock(status_mutex);
+        return last_info;
     }
 
 
@@ -460,6 +659,18 @@ namespace edaa::xess
     bool evaluate(ID3D11Device*, ID3D11DeviceContext*, const upscaler_inputs&)
     {
         return false;
+    }
+
+
+    bool upscale(ID3D11Device*, ID3D11DeviceContext*, const upscaler_inputs&)
+    {
+        return false;
+    }
+
+
+    upscale_info info()
+    {
+        return {};
     }
 
 

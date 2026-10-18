@@ -20,6 +20,7 @@ namespace edaa
         rejection = 4, // where the TAA clipped the reprojected history (red)
         objects = 5, // moving instances and how far camera reprojection misses them
         temporal_change = 6, // how much the TAA output changed since the last frame (flicker finder, camera still)
+        hud_mask = 7, // upscaling: where the cockpit HUD was found (DLSS uses the current frame there)
     };
 
     // Which resolve replaces the game's anti-aliasing.
@@ -35,6 +36,7 @@ namespace edaa
     {
         game = 0, // the game's own (bilinear or FSR), after the anti-aliasing above
         dlss = 1, // NVIDIA DLSS on the tonemapped image (passes.cpp run_upscale)
+        xess = 2, // Intel XeSS on the tonemapped image, through the D3D12 bridge
     };
 
 
@@ -42,7 +44,10 @@ namespace edaa
     {
         int aa_method = 0; // aa_method
         int upscaling = 0; // upscaler
-        bool upscaler_jitter_flip = false; // developer: negate the jitter passed to DLSS/XeSS (sign convention check)
+        bool upscale_hud_mask = true; // upscaling: the cockpit HUD uses the current frame only (no trails)
+        bool upscale_mip_bias = true; // upscaling: scene textures sampled with the display resolution mips (mip_bias.cpp)
+        bool upscaler_jitter_flip = false; // developer, not saved: negate the jitter passed to DLSS/XeSS (sign convention check)
+        float mip_bias_extra = 0; // developer: added to the upscaling mip bias (a large negative value makes it obvious)
         bool jitter_enabled = true; // follows taa_enabled unless changed in developer builds
         int jitter_phases = 8; // Halton(2,3) sequence length
         float jitter_scale = 1.0f; // in pixels; > 1 only to make the effect obvious when testing
@@ -66,6 +71,7 @@ namespace edaa
         int mask_stencil_bits = 0x80; // stencil bit(s) the game sets on the player's vehicle
         float mask_distance = 4.0f; // metres: closer pixels are treated as attached to the vehicle (distance mode)
         bool mask_auto_off_on_foot = true; // no vehicle on foot: the ground near the feet must move
+        bool vehicle_motion = true; // cockpit/SRV pixels get the vehicle's motion (t33), else none
         bool jitter_overlay_draws = true; // also jitter decals, light volumes and glows (else they z-fight and flicker)
         bool object_analysis = false; // developer: read t33 and match instances across frames
         int debug = 0; // debug_view
@@ -104,6 +110,7 @@ namespace edaa
         bool exposure_downsample = false; // R11G11B10 draw at 1/4 render width
         bool hud_shader = false, bloom_shader = false;
         uint32_t gbuffer_binds = 0; // render target bindings that look like a G-buffer (4 targets + depth)
+        uint32_t sampler_binds = 0, biased_binds = 0; // pixel shader sampler binds before the resolve, and those given a mip bias
 
         uint32_t large_cb_maps = 0; // Map of constant buffers >= camera size
         uint32_t large_cb_updates = 0; // UpdateSubresource of constant buffers >= camera size
@@ -165,6 +172,8 @@ namespace edaa
         uint32_t render_w = 0, render_h = 0;
         uint32_t back_buffer_w = 0, back_buffer_h = 0; // swap chain size, from Present (display size)
         int jitter_phases = 8; // Halton phases in use: the setting x (display / render)^2 when upscaling
+        bool upscaling_active = false; // last frame was upscaled by DLSS/XeSS: the method above is not used
+        float mip_bias = 0; // texture LOD bias of the scene draws: log2(render / display) when upscaling, else 0
         uint64_t scene_color = 0; // HDR scene target (G-buffer RT3, R11G11B10), resolved by TAA
         uint64_t depth_candidate = 0; // largest such depth buffer in the frame in progress
         uint64_t color_candidate = 0; // its HDR target
@@ -177,6 +186,7 @@ namespace edaa
         camera_frame camera, prev_camera; // main camera of the last completed frame and the one before
         float camera_speed = 0; // smoothed |delta c275| per frame, metres
         frame_mode mode = frame_mode::unknown;
+        bool vehicle_known = false; // last resolve found the vehicle's motion
         bool on_foot = false; // last resolve saw the first-person body camera (vehicle mask disabled)
 
         uint64_t frame = 0;
@@ -194,13 +204,16 @@ namespace edaa
         bool history_reset = false; // drop the TAA history at the next resolve
         bool upscale_pending = false; // the resolve ran for upscaling: replace the game's upscale draw
         bool upscale_attempted = false; // first draw into a display-size target after the resolve seen
+        bool hud_snapshot_stale = false; // a fullscreen pass was drawn into the scene after the resolve
+        bool hud_mask_done = false; // HUD mask built this frame (at the bloom, or at the upscale without bloom)
         uint64_t ldr_image = 0; // last render-size R8G8B8A8 target drawn after the resolve (tonemap / SMAA output)
         const char* upscale_status = "off";
         bool motion_ok = false; // motion vectors generated last frame
-        // Last frame's resolve ran (TAA, DLSS/XeSS or upscaling motion pass): jitter
-        // only then. Screens it cannot handle (galaxy map: no main camera) would
-        // otherwise show the raw jitter.
-        bool jitter_allowed = false;
+        // Frames in a row whose resolve did not run: past a few, no jitter. Screens
+        // the resolve cannot handle (galaxy map: no main camera) would otherwise
+        // show the raw jitter. A single missed frame (main menu) keeps it.
+        int resolve_misses = 0;
+        bool jitter_allowed = true;
         const char* motion_status = "not started";
 
         bool capture_requested = false; // Ctrl+Shift+C / overlay button
@@ -253,6 +266,12 @@ namespace edaa
     // the instance records of the frame with the previous ones (object_motion.cpp).
     void analyse_objects(addon_state& s);
 
+    // Rigid motion of the player's vehicle (cockpit, SRV) since the previous
+    // frame, from the instance records (object_motion.cpp), as a 3x4 row-major
+    // matrix: current camera-relative position -> previous camera-relative
+    // position. False when it cannot be found (no vehicle, no agreement).
+    bool vehicle_motion(const camera_frame& cur_cam, const camera_frame& prev_cam, float out[12]);
+
     // Runs the motion vector and TAA passes, right before the game's bloom (state not locked).
     void run_resolve(reshade::api::command_list* cmd_list);
 
@@ -260,6 +279,15 @@ namespace edaa
     // upscale_pending: runs the upscaler instead of the game's upscale draw.
     // Returns true when the draw must be skipped (state not locked).
     bool run_upscale(reshade::api::command_list* cmd_list);
+
+    // Right before the game's bloom when upscaling: builds the HUD mask from the
+    // scene saved at the resolve point (state not locked).
+    void run_hud_mask(reshade::api::command_list* cmd_list);
+
+    // Fullscreen passes drawn into the scene after the resolve (on foot: the
+    // helmet visor tint) are not HUD: after each one, the HUD mask takes the
+    // changes so far and the snapshot is taken again (state not locked).
+    void refresh_hud_snapshot(reshade::api::command_list* cmd_list);
 
     // Auto capture state machine, at Present (state not locked).
     void capture_on_present(reshade::api::command_queue* queue, reshade::api::swapchain* swapchain);

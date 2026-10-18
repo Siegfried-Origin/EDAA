@@ -642,10 +642,66 @@ namespace edaa
         }
 
 
+        // Upscaling: the first bloom downsample draw follows the cockpit HUD,
+        // the last thing drawn into the scene: time to build the HUD mask.
+        void check_hud_mask(command_list* cmd_list)
+        {
+            auto* ctx = cmd_list->get_private_data<context_state>();
+
+            if (ctx == nullptr || !ctx->resolve_ps) {
+                return;
+            }
+
+            {
+                addon_state& s = state();
+                const std::lock_guard<std::recursive_mutex> lock(s.mutex);
+
+                if (!s.upscale_pending || s.hud_mask_done || !s.config.upscale_hud_mask) {
+                    return;
+                }
+
+                s.hud_mask_done = true;
+            }
+
+            run_hud_mask(cmd_list);
+        }
+
+
+        // Before each draw: a fullscreen pass drawn into the scene after the
+        // resolve has completed, the HUD mask snapshot is taken again.
+        void check_hud_snapshot(command_list* cmd_list, bool fullscreen)
+        {
+            auto* ctx = cmd_list->get_private_data<context_state>();
+
+            if (ctx == nullptr) {
+                return;
+            }
+
+            bool refresh;
+            {
+                addon_state& s = state();
+                const std::lock_guard<std::recursive_mutex> lock(s.mutex);
+
+                if (!s.upscale_pending || s.hud_mask_done || !s.config.upscale_hud_mask) {
+                    return;
+                }
+
+                refresh = s.hud_snapshot_stale;
+                s.hud_snapshot_stale = fullscreen && ctx->rt0 != 0 && ctx->rt0 == s.scene_color;
+            }
+
+            if (refresh) {
+                refresh_hud_snapshot(cmd_list);
+            }
+        }
+
+
         bool on_draw(command_list* cmd_list, uint32_t vertex_count, uint32_t instance_count, uint32_t, uint32_t)
         {
             const bool fullscreen = vertex_count == 3 && instance_count == 1;
             check_resolve_point(cmd_list);
+            check_hud_snapshot(cmd_list, fullscreen);
+            check_hud_mask(cmd_list);
 
             if (check_upscale_draw(cmd_list)) {
                 return true; // replaced by the upscaler
@@ -664,6 +720,8 @@ namespace edaa
         bool on_draw_indexed(command_list* cmd_list, uint32_t index_count, uint32_t instance_count, uint32_t, int32_t, uint32_t)
         {
             check_resolve_point(cmd_list);
+            check_hud_snapshot(cmd_list, false);
+            check_hud_mask(cmd_list);
 
             if (check_upscale_draw(cmd_list)) {
                 return true;
@@ -735,6 +793,8 @@ namespace edaa
         s.upscale_pending = false;
         s.upscale_attempted = false;
         s.ldr_image = 0;
+        s.hud_mask_done = false;
+        s.hud_snapshot_stale = false;
         s.depth_candidate = s.color_candidate = 0;
         s.candidate_w = s.candidate_h = 0;
 
@@ -747,9 +807,13 @@ namespace edaa
         // (NVIDIA: 8 x ratio^2 phases).
         s.jitter_phases = std::max(1, s.config.jitter_phases);
 
+        s.mip_bias = 0;
+        s.upscaling_active = upscaled;
+
         if (upscaled && s.render_w != 0 && s.render_w < s.back_buffer_w) {
             const float ratio = static_cast<float>(s.back_buffer_w) / static_cast<float>(s.render_w);
             s.jitter_phases = static_cast<int>(std::ceil(static_cast<float>(s.jitter_phases) * ratio * ratio));
+            s.mip_bias = s.config.upscale_mip_bias ? -std::log2(ratio) + s.config.mip_bias_extra : 0.0f;
         }
 
         // Next Halton(2,3) sample, centred on the pixel: [-0.5, 0.5).

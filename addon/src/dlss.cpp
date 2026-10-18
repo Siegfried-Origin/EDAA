@@ -268,6 +268,8 @@ namespace edaa::dlss
             eval.InMVScaleX = static_cast<float>(in.width);
             eval.InMVScaleY = static_cast<float>(in.height);
             eval.InRenderSubrectDimensions = { in.width, in.height };
+            // HUD drawn after the resolve: not jittered, no motion vectors, so no history there.
+            eval.pInBiasCurrentColorMask = in.hud_mask;
 
             const NVSDK_NGX_Result result = NGX_D3D11_EVALUATE_DLSS_EXT(ctx, feature, params, &eval);
 

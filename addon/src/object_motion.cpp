@@ -14,6 +14,12 @@
 //      misses them: history is fetched where the camera alone would have put
 //      the point, the object really was elsewhere -> ghost offset in pixels.
 // Results go to the overlay and the "Moving objects" debug view.
+//
+// Used in every build: the motion of the player's vehicle (vehicle_motion).
+// Cockpit and SRV parts are rigid with the hull, so matching the records near
+// the camera between two frames gives one rigid transform. Applied to the
+// vehicle pixels (stencil mask), it gives them their true motion, head
+// movements included, instead of none.
 
 #include "events.hpp"
 #include "state.hpp"
@@ -48,7 +54,7 @@ namespace edaa
         };
         static_assert(sizeof(record) == 32);
 
-        std::atomic<bool> enabled{ false };
+        std::atomic<bool> enabled{ true }; // records are always read (vehicle motion)
         std::mutex records_mutex; // protects everything below
         std::unordered_map<uint64_t, void*> mapped; // t33-like buffers waiting for Unmap
         std::vector<record> pending; // records written this frame
@@ -120,17 +126,23 @@ namespace edaa
                 return;
             }
 
-            const std::lock_guard<std::mutex> lock(records_mutex);
-            const auto it = mapped.find(resource.handle);
+            const uint8_t* data = nullptr;
+            {
+                const std::lock_guard<std::mutex> lock(records_mutex);
+                const auto it = mapped.find(resource.handle);
 
-            if (it == mapped.end()) {
-                return;
+                if (it == mapped.end()) {
+                    return;
+                }
+
+                data = static_cast<const uint8_t*>(it->second);
+                mapped.erase(it);
             }
 
-            const uint8_t* const data = static_cast<const uint8_t*>(it->second);
-            mapped.erase(it);
+            // No device call with the records lock held (lock order, see frame_tracking.cpp).
             // Called before the native Unmap: the mapping is still valid.
             const size_t count = static_cast<size_t>(device->get_resource_desc(resource).buffer.size / record_stride);
+            const std::lock_guard<std::mutex> lock(records_mutex);
             const double start = now_ms();
 
             if (count >= pending.size()) { // several such buffers: keep the largest
@@ -378,7 +390,6 @@ namespace edaa
     void analyse_objects(addon_state& s)
     {
         const bool on = s.config.object_analysis || s.config.debug == static_cast<int>(debug_view::objects);
-        enabled = on;
 
         std::vector<record> cur;
         uint32_t maps;
@@ -390,17 +401,14 @@ namespace edaa
             read_ms = pending_read_ms;
             pending_maps = 0;
             pending_read_ms = 0;
-
-            if (!on) {
-                previous.clear();
-                mapped.clear();
-            }
         }
 
         s.objects = {};
         s.marker_count = 0;
 
         if (!on) {
+            const std::lock_guard<std::mutex> lock(records_mutex);
+            previous.swap(cur); // kept for vehicle_motion
             return;
         }
 
@@ -422,6 +430,181 @@ namespace edaa
 
         const std::lock_guard<std::mutex> lock(records_mutex);
         previous.swap(cur);
+    }
+
+
+    namespace
+    {
+        // Unit quaternion (x, y, z, w) of a packed record rotation -> row-major 3x3 matrix.
+        void rotation_matrix(uint64_t packed, double m[9])
+        {
+            double q[4];
+
+            for (int i = 0; i < 4; ++i) {
+                q[i] = static_cast<double>((packed >> (16 * i)) & 0xFFFF) / 32768.0 - 1.0;
+            }
+
+            const double n = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+            const double x = q[0] / n, y = q[1] / n, z = q[2] / n, w = q[3] / n;
+            const double r[9] = { 1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w),
+                2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w),
+                2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y) };
+            std::memcpy(m, r, sizeof(r));
+        }
+
+
+        // Rigid motion of one record from the previous frame: x_cur = R x_prev + t.
+        struct rigid
+        {
+            double r[9], t[3];
+        };
+
+
+        rigid motion_of(const record& prev, const record& cur)
+        {
+            double rp[9], rc[9];
+            rotation_matrix(prev.rotation, rp);
+            rotation_matrix(cur.rotation, rc);
+            rigid m;
+
+            for (int i = 0; i < 3; ++i) {
+                for (int j = 0; j < 3; ++j) {
+                    m.r[i * 3 + j] = rc[i * 3] * rp[j * 3] + rc[i * 3 + 1] * rp[j * 3 + 1] + rc[i * 3 + 2] * rp[j * 3 + 2]; // Rc Rp^T
+                }
+            }
+
+            for (int i = 0; i < 3; ++i) {
+                m.t[i] = cur.pos[i] - (m.r[i * 3] * prev.pos[0] + m.r[i * 3 + 1] * prev.pos[1] + m.r[i * 3 + 2] * prev.pos[2]);
+            }
+
+            return m;
+        }
+
+
+        // Same motion: points around 'at' (up to 10 m away) land within 5 mm.
+        bool similar(const rigid& a, const rigid& b, const record& at)
+        {
+            for (int i = 0; i < 3; ++i) {
+                double pa = a.t[i], pb = b.t[i];
+
+                for (int j = 0; j < 3; ++j) {
+                    pa += a.r[i * 3 + j] * at.pos[j];
+                    pb += b.r[i * 3 + j] * at.pos[j];
+
+                    if (std::fabs(a.r[i * 3 + j] - b.r[i * 3 + j]) * 10.0 > 0.005) {
+                        return false;
+                    }
+                }
+
+                if (std::fabs(pa - pb) > 0.005) {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+    }
+
+
+    bool vehicle_motion(const camera_frame& cur_cam, const camera_frame& prev_cam, float out[12])
+    {
+        std::vector<record> cur, prev;
+        {
+            const std::lock_guard<std::mutex> lock(records_mutex);
+            cur = pending; // this frame's records (written at the start of the frame)
+            prev = previous;
+        }
+
+        if (cur.empty() || prev.empty() || !cur_cam.valid || !prev_cam.valid) {
+            return false;
+        }
+
+        double cam_delta[3];
+
+        for (int k = 0; k < 3; ++k) {
+            cam_delta[k] = static_cast<double>(cur_cam.position[k]) - prev_cam.position[k];
+        }
+
+        // Records near the camera, matched to the previous one at the same place
+        // relative to the camera (the vehicle carries both), same kind and scale.
+        std::vector<const record*> near_prev;
+
+        for (const record& p : prev) {
+            if (valid(p) && distance(p.pos, prev_cam.position) < 20.0f) {
+                near_prev.push_back(&p);
+            }
+        }
+
+        std::vector<std::pair<rigid, const record*>> motions;
+
+        for (const record& c : cur) {
+            if (!valid(c) || distance(c.pos, cur_cam.position) >= 20.0f) {
+                continue;
+            }
+
+            const record* best = nullptr;
+            double best_d = 0.25; // metres, once the camera motion is removed
+
+            for (const record* p : near_prev) {
+                if ((p->base == 0) != (c.base == 0) || std::fabs(p->scale - c.scale) > 1e-3f * c.scale) {
+                    continue;
+                }
+
+                double d2 = 0;
+
+                for (int k = 0; k < 3; ++k) {
+                    const double d = c.pos[k] - p->pos[k] - cam_delta[k];
+                    d2 += d * d;
+                }
+
+                if (std::sqrt(d2) < best_d) {
+                    best_d = std::sqrt(d2);
+                    best = p;
+                }
+            }
+
+            if (best != nullptr && motions.size() < 256) {
+                motions.emplace_back(motion_of(*best, c), &c);
+            }
+        }
+
+        // The motion shared by the most records (animated parts and mismatches vote alone).
+        int best = -1, best_votes = 0;
+
+        for (size_t i = 0; i < motions.size(); ++i) {
+            int votes = 0;
+
+            for (size_t j = 0; j < motions.size(); ++j) {
+                votes += similar(motions[i].first, motions[j].first, *motions[j].second) ? 1 : 0;
+            }
+
+            if (votes > best_votes) {
+                best_votes = votes;
+                best = static_cast<int>(i);
+            }
+        }
+
+        if (best < 0 || best_votes < 3 || best_votes * 2 < static_cast<int>(motions.size())) {
+            return false;
+        }
+
+        // Current camera-relative position -> previous camera-relative position:
+        // p_prev = R^T (p + cam - t) - cam_prev.
+        const rigid& m = motions[best].first;
+
+        for (int i = 0; i < 3; ++i) {
+            double offset = -static_cast<double>(prev_cam.position[i]);
+
+            for (int j = 0; j < 3; ++j) {
+                const double rt = m.r[j * 3 + i]; // R^T
+                out[i * 4 + j] = static_cast<float>(rt);
+                offset += rt * (static_cast<double>(cur_cam.position[j]) - m.t[j]);
+            }
+
+            out[i * 4 + 3] = static_cast<float>(offset);
+        }
+
+        return true;
     }
 
 

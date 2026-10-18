@@ -17,6 +17,7 @@ namespace edaa
         ID3D11Resource* depth = nullptr; // scene depth, reverse-Z (DLSS: the game's D32S8, XeSS: an R32_FLOAT copy)
         ID3D11Resource* motion = nullptr; // RG16F, previous UV - current UV, jitter removed
         ID3D11Resource* output = nullptr; // UAV texture at the output size, copied into the scene / back buffer afterwards
+        ID3D11Resource* hud_mask = nullptr; // upscaling: R8 at render size, 1 on the cockpit HUD (use the current frame there)
         uint32_t width = 0, height = 0; // render size
         uint32_t output_width = 0, output_height = 0; // upscaling: display size (0: same as the render size)
         float jitter_x = 0, jitter_y = 0; // pixels, the viewport offset of this frame

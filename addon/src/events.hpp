@@ -15,4 +15,7 @@ namespace edaa
 
     void register_pass_events();
     void unregister_pass_events();
+
+    void register_mip_bias_events();
+    void unregister_mip_bias_events();
 }

@@ -48,8 +48,17 @@ Per frame, in the order the game draws:
    state saved/restored):
    1. motion vectors (`motion.hlsl`): camera reprojection from depth, jitter
       removed, `R16G16_FLOAT` (previous UV - current UV); vehicle mask
-      `R8_UNORM` from stencil bit `0x80` (player's cockpit / SRV, moves with
-      the camera: zero motion);
+      `R8_UNORM` from stencil bit `0x80` (player's cockpit / SRV). Those
+      pixels get the vehicle's own motion (option "Vehicle motion", on):
+      `vehicle_motion` (`object_motion.cpp`) matches the `t33` records within
+      20 m of the camera with the previous frame's (same place once the
+      camera motion is removed, same kind and scale), takes the rigid motion
+      most of them share (vote; animated parts disagree) and passes it as a
+      3x4 matrix, current to previous camera-relative position. Head
+      movements (free look, G-forces, shake) then move the cockpit on screen
+      as they should. When no motion is found, those pixels get none (they
+      mostly move with the camera). Checked offline on the cockpit_turn pair:
+      62 records, one motion, 0.5 mm error at most;
    2. TAA (`taa.hlsl`): 3x3 neighbourhood in YCoCg on HDR compressed by
       `c / (1 + max)`, variance clip (`mean +- gamma * sigma` inside
       min/max; gamma 5 for still pixels, 1.25 in motion), history at
@@ -67,8 +76,8 @@ Per frame, in the order the game draws:
    the next frames get no jitter and no TAA, and the history is reset when
    the map closes. The main menu hangar (476 G-buffer draws) keeps the TAA;
    loading screens and most likely the galaxy map are paused.
-   Besides, the jitter only runs when the previous frame's resolve succeeded:
-   the galaxy map is not detected as a map, but it has no main perspective
+   Besides, the jitter stops after 4 frames in a row without a successful
+   resolve: the galaxy map is not detected as a map, but it has no main perspective
    camera, so the resolve stops ("waiting for two frames with a main
    camera") and the jitter, left alone, made the map shake.
    See reverse-engineering.md section 8.
@@ -128,9 +137,29 @@ Per frame, in the order the game draws:
    (NVIDIA: 8 x ratio^2) so each display pixel gets as many samples as at
    native resolution. If the draw is not recognised or DLSS fails, the game's
    draw runs, the TAA is used for these sizes and upscaling is retried after
-   600 frames. Not done yet: the HUD (drawn into the scene after the resolve,
-   not jittered) is upscaled with the world (mask planned), texture mip bias
-   for the render size, XeSS.
+   600 frames.
+   HUD mask ("HUD mask" in the overlay, on): the cockpit HUD is drawn into
+   the scene after the resolve, so it is neither jittered nor covered by the
+   motion vectors, and DLSS would smear it. The scene is copied at the
+   resolve point; at the first bloom downsample draw (or at the upscale when
+   there is no bloom) `ps_hud_mask` marks the pixels that changed since
+   (3x3 dilated) into an R8 render-size mask, passed to DLSS as the "bias
+   current colour" mask: those pixels use the current frame only. Debug view
+   "HUD mask (upscaling)" shows it in cyan.
+   Mip bias ("Texture mip bias", on; `mip_bias.cpp`): the game picks texture
+   mips for the render size, too blurry once upscaled. Each pixel shader
+   sampler bound before the resolve is replaced, right after the game's
+   PSSetSamplers (ReShade `push_descriptors`), by a cached copy with
+   `MipLODBias + log2(render / display)` (-1 at half resolution). Copies are
+   freed with the game's sampler (`destroy_sampler`); no D3D11 call is made
+   while holding the cache lock.
+   XeSS upscaling ("Upscaling" = Intel XeSS): same path, through the D3D12
+   bridge of 6c. Preset: the one whose input range
+   (`xessGetOptimalInputResolution`, logged once per display size) contains
+   the render size, else the closest optimal size. Flags INVERTED_DEPTH,
+   LDR_INPUT_COLOR and RESPONSIVE_PIXEL_MASK: the HUD mask goes to the
+   responsive mask (cleared when there is none). Depth is copied to
+   R32_FLOAT first, as for XeSS Native AA.
 7. **At Present** (`passes.cpp`, `capture.cpp`): optional debug view over the
    back buffer, auto capture, next jitter phase.
 
@@ -251,6 +280,17 @@ defaults" restores the values below. The debug view always starts off.
   only have camera motion; ghosting there is limited by the variance clip.
   Plan: [motion-vectors.md](motion-vectors.md) section 3.
 * Thin very bright highlights can still flicker slightly.
+* Rendering below 1x (supersampling < 1 or FSR) with the game's shadow
+  quality on Ultra: shadow edges and large soft shadows flicker with the
+  jitter, whatever the method (EDAA TAA, DLAA, DLSS/XeSS upscaling). The
+  sun shadow mask pass (pixel shader `77cb0c225019d08b`) rebuilds positions
+  from SV_Position and a view ray in its `cb2` (`ndc.x*cb2[1] +
+  ndc.y*cb2[2] + cb2[4]`) times the jittered depth: the ray is the
+  unjittered pixel centre, so positions are off by up to half a pixel along
+  the depth slope and the shadow test flips on grazing surfaces. Shifting
+  the viewport cannot reach SV_Position; the fix would be a jittered copy of
+  `cb2` for that draw (not done). Medium shadows reduce it; the overlay
+  mentions it when the game renders below the display size.
 * Map detection takes effect one frame after the map appears (one frame
   with jitter when it opens). The galaxy map is not flagged as a map but
   is not affected either: it has no G-buffer scene with a main camera, so

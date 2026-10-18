@@ -414,8 +414,39 @@ Signatures, checked against all 12 captures:
   game. "No sun shadows and fewer than 32 G-buffer draws" separates the map
   from the menu; the loading screen (5 draws) also matches.
 
-The galaxy map was not captured; it probably matches the heuristic (no sun
-shadows, little geometry) but its shaders are unknown.
+`sysmap.rdc` again (2560x1440, October 2026), pass by pass:
+
+* the 2D map UI (panels, text) is drawn first into its own R8G8B8A8 target
+  (76 draws with a D24S8 depth) and composited after the tonemap;
+* G-buffer (10 draws, GREATER_EQUAL), lighting, then 57 draws into the HDR
+  target: bodies (`f5938f31368af521`, depth write), orbits
+  (`585da4349c0b97d9`, `b161b02137d7d2e2`, depth test without write), body
+  icons and markers (6-index quads, no depth test);
+* exposure downsample (640x360 = 1/4), bloom, tonemap into an R8G8B8A8
+  target, one draw into the back buffer (it only reads the tonemapped image),
+  then the 2D UI;
+* one perspective camera in cb1 for the whole scene (c270-c275, near 0.025,
+  no off-centre terms), so camera motion vectors work as in game. Orbits do
+  not write depth: their motion comes from what is behind them (sky =
+  rotation only), which is wrong when the camera translates.
+
+Resolve after the exposure downsample, before bloom, the 2D UI untouched.
+First test: trails on everything while panning. The stencil plane carries the
+"player's vehicle" bit on the map too, so the vehicle mask zeroed the motion:
+it is disabled on the map. Then the EDAA TAA and XeSS are clean, DLAA still
+smears: in the motion vector view the bodies get one uniform motion and the
+background none while the bodies move along arcs, so part of the panning is
+not in c270-c275 (objects moved rather than the camera). The TAA and XeSS
+clip such history, DLSS trusts the vectors. An exception only for DLSS was judged
+too hacky: the system map stays without anti-aliasing (paused, as before).
+
+`galmap.rdc` (galaxy map): a G-buffer bind with fullscreen draws only, then
+about 430 draws into the HDR target, all without depth test: instanced star
+points (52472 and 15291 instances), nebulae, about 400 route and icon quads.
+The depth buffer stays empty, so no camera motion vector can be rebuilt for
+the stars, and no scene draw counts for the main camera ("waiting for two
+frames with a main camera"). It is left without anti-aliasing (and, since
+v0.3.2, without jitter).
 
 ## 9. High-resolution screenshot (Alt+F10)
 

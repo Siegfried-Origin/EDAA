@@ -35,7 +35,8 @@ add_custom_command(
 	COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUT}
 	COMMAND ${FXC} /nologo /O3 /T ps_5_0 /E ps_taa /Vn g_ps_taa /Fh ${SHADER_OUT}/ps_taa.h ${TAA_SRC}
 	COMMAND ${FXC} /nologo /O3 /T ps_5_0 /E ps_copy /Vn g_ps_copy /Fh ${SHADER_OUT}/ps_copy.h ${TAA_SRC}
-	COMMAND ${CMAKE_COMMAND} -DOUT=${TAA_HEADER} -DHEADERS=ps_taa.h,ps_copy.h -P ${CMAKE_SOURCE_DIR}/addon/shaders/combine.cmake
+	COMMAND ${FXC} /nologo /O3 /T ps_5_0 /E ps_hud_mask /Vn g_ps_hud_mask /Fh ${SHADER_OUT}/ps_hud_mask.h ${TAA_SRC}
+	COMMAND ${CMAKE_COMMAND} -DOUT=${TAA_HEADER} -DHEADERS=ps_taa.h,ps_copy.h,ps_hud_mask.h -P ${CMAKE_SOURCE_DIR}/addon/shaders/combine.cmake
 	DEPENDS ${TAA_SRC} ${CMAKE_SOURCE_DIR}/addon/shaders/combine.cmake
 	COMMENT "Compiling taa.hlsl"
 )
@@ -57,6 +58,7 @@ add_library(edaa SHARED
 	addon/src/camera_tracker.cpp
 	addon/src/frame_tracking.cpp
 	addon/src/passes.cpp
+	addon/src/mip_bias.cpp
 	addon/src/object_motion.cpp
 	addon/src/overlay.cpp
 	addon/src/capture.cpp

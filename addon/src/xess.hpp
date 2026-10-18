@@ -1,5 +1,6 @@
-// Intel XeSS Super Resolution in Native AA mode (render size = output size),
-// as an alternative to the EDAA TAA resolve. Built in when the XeSS SDK is
+// Intel XeSS Super Resolution: Native AA (render size = output size) as an
+// alternative to the EDAA TAA resolve, or upscaling in place of the game's
+// final upscale. Built in when the XeSS SDK is
 // present (submodule third_party/xess, EDAA_XESS=1).
 //
 // XeSS supports D3D11 only on Intel Arc GPUs, so it runs on D3D12 for every
@@ -21,6 +22,15 @@ namespace edaa::xess
     // back to the EDAA TAA and status() says why. Render thread only.
     // Initialises the D3D12 bridge and XeSS on the first call.
     bool evaluate(ID3D11Device* device, ID3D11DeviceContext* ctx, const upscaler_inputs& in);
+
+    // Upscaling (in.output_width/height larger than the render size): uses the
+    // quality preset whose input range (xessGetOptimalInputResolution) contains
+    // the render size, in.hud_mask as responsive pixel mask. Same return
+    // convention as evaluate().
+    bool upscale(ID3D11Device* device, ID3D11DeviceContext* ctx, const upscaler_inputs& in);
+
+    // Presets for the last display size and the one used by upscale(). Any thread.
+    upscale_info info();
 
     // Checks once per device whether XeSS can run on this system
     // (libxess.dll, D3D12 bridge, GPU support), so the overlay only offers it when it can. Render thread.

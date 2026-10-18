@@ -34,24 +34,41 @@ namespace edaa
         void draw_upscaling(addon_state& s, change_tracker& edit)
         {
             ImGui::Separator();
-            const int dlss_available = dlss::availability();
-            const bool dlss_usable = dlss_available == 1 || EDAA_DEVELOPER;
-            const char* dlss_label = dlss_available == 1 ? "NVIDIA DLSS"
-                : dlss_available == 0                    ? "NVIDIA DLSS - not available on this system"
-                                                         : "NVIDIA DLSS - checking...";
-            const bool dlss_selected = s.config.upscaling == static_cast<int>(upscaler::dlss) && dlss_usable;
 
-            if (ImGui::BeginCombo("Upscaling", dlss_selected ? "NVIDIA DLSS" : "Game (bilinear or FSR)")) {
-                if (ImGui::Selectable("Game (bilinear or FSR)", !dlss_selected) && dlss_selected) {
-                    s.config.upscaling = static_cast<int>(upscaler::game);
-                    s.history_reset = true;
-                    edit.changed = true;
+            // Same rules as the method list: unavailable backends are greyed out.
+            struct choice
+            {
+                upscaler backend;
+                const char* name;
+                int availability; // -1 not checked yet, 0 no, 1 yes
+            };
+            const choice choices[] = {
+                { upscaler::game, "Game (bilinear or FSR)", 1 },
+                { upscaler::dlss, "NVIDIA DLSS", dlss::availability() },
+                { upscaler::xess, "Intel XeSS", xess::availability() },
+            };
+            const choice* shown = &choices[0];
+
+            for (const choice& c : choices) {
+                if (s.config.upscaling == static_cast<int>(c.backend) && (c.availability == 1 || EDAA_DEVELOPER)) {
+                    shown = &c;
                 }
+            }
 
-                if (ImGui::Selectable(dlss_label, dlss_selected, dlss_usable ? 0 : ImGuiSelectableFlags_Disabled) && !dlss_selected) {
-                    s.config.upscaling = static_cast<int>(upscaler::dlss);
-                    s.history_reset = true;
-                    edit.changed = true;
+            if (ImGui::BeginCombo("Upscaling", shown->name)) {
+                for (const choice& c : choices) {
+                    const bool usable = c.availability == 1 || EDAA_DEVELOPER;
+                    char label[96];
+                    snprintf(label, sizeof(label), "%s%s", c.name,
+                        c.availability == 1 ? "" : c.availability == 0 ? " - not available on this system"
+                                                                       : " - checking...");
+
+                    if (ImGui::Selectable(label, &c == shown, usable ? 0 : ImGuiSelectableFlags_Disabled) &&
+                        s.config.upscaling != static_cast<int>(c.backend)) {
+                        s.config.upscaling = static_cast<int>(c.backend);
+                        s.history_reset = true;
+                        edit.changed = true;
+                    }
                 }
 
                 ImGui::EndCombo();
@@ -62,21 +79,24 @@ namespace edaa
             ImGui::Text("Rendering resolution: %u x %u (%.2f x the display)", render_w, s.render_h, scale);
             ImGui::Text("Display resolution:   %u x %u", display_w, s.back_buffer_h);
 
-            if (!dlss_selected) {
+            if (shown->backend == upscaler::game) {
                 return;
             }
 
             if (render_w == 0 || render_w >= display_w) {
                 ImGui::TextUnformatted("Upscaling inactive: the game renders at the display resolution.");
-                ImGui::TextUnformatted("Set the in-game supersampling below 1.0 (or an FSR mode) to use DLSS.");
+                ImGui::TextUnformatted("Set the in-game supersampling below 1.0 (or an FSR mode) to use it.");
                 return;
             }
 
+            const bool use_xess = shown->backend == upscaler::xess;
+            edit(ImGui::Checkbox("HUD mask (cockpit HUD from the current frame: no trails)", &s.config.upscale_hud_mask));
+            edit(ImGui::Checkbox("Texture mip bias (display resolution texture detail)", &s.config.upscale_mip_bias));
             ImGui::Text("Upscaling: %s", s.upscale_status);
-            ImGui::Text("DLSS: %s", dlss::status().c_str());
-            ImGui::Text("Jitter: %d phases", s.jitter_phases);
+            ImGui::Text("%s: %s", use_xess ? "XeSS" : "DLSS", use_xess ? xess::status().c_str() : dlss::status().c_str());
+            ImGui::Text("Jitter: %d phases, texture LOD bias %+.2f", s.jitter_phases, s.mip_bias);
 
-            const upscale_info info = dlss::info();
+            const upscale_info info = use_xess ? xess::info() : dlss::info();
 
             if (info.modes.empty()) {
                 return;
@@ -85,7 +105,7 @@ namespace edaa
             // Each mode's range comes from the API for this display size. The game
             // picks the render size: its supersampling should fall in the range.
             if (ImGui::BeginTable("modes", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit)) {
-                ImGui::TableSetupColumn("DLSS mode");
+                ImGui::TableSetupColumn(use_xess ? "XeSS preset" : "DLSS mode");
                 ImGui::TableSetupColumn("Optimal");
                 ImGui::TableSetupColumn("Accepted render sizes");
                 ImGui::TableSetupColumn("Scale");
@@ -107,6 +127,7 @@ namespace edaa
             }
 
             ImGui::TextUnformatted("Scale: the in-game supersampling closest to the mode's optimal size.");
+            ImGui::TextUnformatted("Below 1x, sun shadow edges flicker with the jitter (lower shadow quality reduces it).");
         }
 
 
@@ -138,6 +159,9 @@ namespace edaa
                 }
             }
 
+            // Upscaling with DLSS/XeSS: the upscaler also does the anti-aliasing.
+            ImGui::BeginDisabled(s.upscaling_active);
+
             if (ImGui::BeginCombo("Method", shown->name)) {
                 for (const choice& c : choices) {
                     const bool usable = c.availability == 1 || EDAA_DEVELOPER;
@@ -155,6 +179,12 @@ namespace edaa
                 }
 
                 ImGui::EndCombo();
+            }
+
+            ImGui::EndDisabled();
+
+            if (s.upscaling_active) {
+                ImGui::TextDisabled("Not used while upscaling: DLSS/XeSS also do the anti-aliasing (see Upscaling).");
             }
 
             ImGui::Text("Status: %s", s.config.taa_enabled ? s.motion_status : "off");
@@ -202,6 +232,7 @@ namespace edaa
             edit(ImGui::Checkbox("Resolve before the HUD pass (HUD sharp, not anti-aliased)", &s.config.taa_before_hud));
             edit(ImGui::Checkbox("Detect maps also by missing sun shadows", &s.config.map_detect_no_shadows));
             edit(ImGui::Combo("Vehicle mask", &s.config.mask_source, "Game stencil (player's vehicle)\0Distance to camera\0"));
+            edit(ImGui::Checkbox("Vehicle motion (cockpit follows head movements)", &s.config.vehicle_motion));
 
             if (s.config.mask_source == 1) {
                 edit(ImGui::SliderFloat("Vehicle mask distance (m)", &s.config.mask_distance, 0.0f, 20.0f, "%.1f"));
@@ -265,6 +296,8 @@ namespace edaa
                 s.last.hud_shader ? "yes" : "no", s.last.bloom_shader ? "yes" : "no");
             ImGui::Text("Map on screen: %s", s.map_reason);
             ImGui::Text("On foot (first-person body drawn): %s", s.on_foot ? "yes" : "no");
+            ImGui::Text("Vehicle motion: %s", !s.config.vehicle_motion ? "off" : s.vehicle_known ? "found"
+                                                                                                 : "not found (vehicle pixels get no motion)");
 
             ImGui::Separator();
             ImGui::TextUnformatted("Jitter (Ctrl+Shift+J)");
@@ -273,6 +306,8 @@ namespace edaa
             edit(ImGui::SliderFloat("Amplitude (pixels)", &s.config.jitter_scale, 1.0f, 16.0f, "%.1f"));
             edit(ImGui::Checkbox("Jitter decals, light volumes and glows (off: they z-fight and flicker)", &s.config.jitter_overlay_draws));
             edit(ImGui::Checkbox("DLSS/XeSS: negate the jitter offset (sign convention check)", &s.config.upscaler_jitter_flip));
+            edit(ImGui::SliderFloat("Upscaling: extra mip bias", &s.config.mip_bias_extra, -4.0f, 2.0f, "%+.1f"));
+            ImGui::Text("Last frame: %u pixel shader sampler binds before the resolve, %u given a mip bias", s.last.sampler_binds, s.last.biased_binds);
             ImGui::Text("Current offset: %+.3f, %+.3f px", s.jitter_x, s.jitter_y);
             ImGui::Text("Last frame: %u of %u scene draws jittered", s.last.jittered_draws, s.last.scene_draws);
 
@@ -287,7 +322,7 @@ namespace edaa
             ImGui::Separator();
             ImGui::TextUnformatted("Debug views (Ctrl+Shift+M)");
             edit(ImGui::Checkbox("Generate motion vectors", &s.config.motion_enabled));
-            ImGui::Combo("Debug view", &s.config.debug, "Off\0Motion vectors\0Vehicle mask\0Depth\0History rejection\0Moving objects\0Temporal change (flicker)\0");
+            ImGui::Combo("Debug view", &s.config.debug, "Off\0Motion vectors\0Vehicle mask\0Depth\0History rejection\0Moving objects\0Temporal change (flicker)\0HUD mask (upscaling)\0");
             edit(ImGui::SliderFloat("Colour saturation (px)", &s.config.debug_motion_pixels, 1.0f, 64.0f, "%.0f"));
 
             ImGui::Separator();
