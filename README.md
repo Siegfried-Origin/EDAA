@@ -65,9 +65,12 @@ Installed with the installer: Windows Settings > Apps > "EDAA" (removes
 `EDAA.addon64`, `nvngx_dlss.dll` and `libxess.dll`; ReShade stays). By hand:
 close the game and delete these three files from the game folder.
 
-To remove ReShade too: run the ReShade setup and choose "Uninstall", or
-delete `dxgi.dll`, `ReShade.ini`, `ReShade.log` and the `reshade-shaders`
+To remove ReShade too:
+- delete `dxgi.dll`, `ReShade.ini`, `ReShade.log` and the `reshade-shaders`
 folder if present.
+- or, run the ReShade setup and choose "Uninstall". WARNING: this option will
+also remove EDHM if installed (it deletes `d3d11.dll` from your game install.
+Either backup your `d3d11.dll` before uninstalling or reinstall EDHM after. 
 
 ## Releases
 
