@@ -66,6 +66,8 @@ namespace edaa
             float blend[4]; // history weight, weight at high motion, reset, clip gamma
             float flicker[4]; // anti-flicker on, minimum history weight, static clip gamma, soft off-screen
             float hdr[4]; // HDR compression scale
+            float display_size[4]; // upscaling (ps_taau): output w, h, 1/w, 1/h
+            float sharpen[4]; // upscaling (ps_sharpen): sharpness
         };
 
         struct target
@@ -87,7 +89,7 @@ namespace edaa
         {
             ID3D11Device* device = nullptr; // not owned
             ComPtr<ID3D11VertexShader> vs;
-            ComPtr<ID3D11PixelShader> ps_motion, ps_debug, ps_taa, ps_copy, ps_hud_mask;
+            ComPtr<ID3D11PixelShader> ps_motion, ps_debug, ps_taa, ps_copy, ps_hud_mask, ps_taau, ps_sharpen;
             ComPtr<ID3D11Buffer> motion_cb, taa_cb, object_cb;
             ComPtr<ID3D11SamplerState> linear_clamp;
             ComPtr<ID3D11BlendState> max_blend; // HUD mask accumulation
@@ -102,6 +104,8 @@ namespace edaa
             target hud_mask; // upscaling: R8, 1 where the HUD was drawn (ps_hud_mask)
             DXGI_FORMAT color_format = DXGI_FORMAT_UNKNOWN; // typed format of the game's scene target
             target upscale_output; // upscaling: display-size UAV output, drawn into the game's target
+            target taau_history[2]; // EDAA TAA upscaling: display-size history
+            int taau_index = 0; // taau_history[taau_index] = last output
             uint64_t upscale_frame = 0; // frame of the last upscale (+1: the upscaler history is usable)
             int upscaler_last = -1; // aa_method that ran last frame (-1: none): its history is usable
             int history_index = 0; // history[history_index] = last output
@@ -214,6 +218,8 @@ namespace edaa
                 SUCCEEDED(device->CreatePixelShader(g_ps_taa, sizeof(g_ps_taa), nullptr, &gpu.ps_taa)) &&
                 SUCCEEDED(device->CreatePixelShader(g_ps_copy, sizeof(g_ps_copy), nullptr, &gpu.ps_copy)) &&
                 SUCCEEDED(device->CreatePixelShader(g_ps_hud_mask, sizeof(g_ps_hud_mask), nullptr, &gpu.ps_hud_mask)) &&
+                SUCCEEDED(device->CreatePixelShader(g_ps_taau, sizeof(g_ps_taau), nullptr, &gpu.ps_taau)) &&
+                SUCCEEDED(device->CreatePixelShader(g_ps_sharpen, sizeof(g_ps_sharpen), nullptr, &gpu.ps_sharpen)) &&
                 SUCCEEDED(device->CreateSamplerState(&sampler, &gpu.linear_clamp)) &&
                 SUCCEEDED(device->CreateBlendState(&max_blend, &gpu.max_blend)) &&
                 create_buffer(sizeof(motion_constants), gpu.motion_cb) &&
@@ -655,6 +661,83 @@ namespace edaa
         }
 
 
+        // TAA settings shared by ps_taa and ps_taau.
+        void fill_taa_constants(taa_constants& tc, const settings& config, uint32_t render_w, uint32_t render_h, float jitter_x,
+            float jitter_y, bool reset)
+        {
+            tc.render_size[0] = static_cast<float>(render_w);
+            tc.render_size[1] = static_cast<float>(render_h);
+            tc.render_size[2] = 1.0f / tc.render_size[0];
+            tc.render_size[3] = 1.0f / tc.render_size[1];
+            tc.jitter[0] = jitter_x * tc.render_size[2];
+            tc.jitter[1] = jitter_y * tc.render_size[3];
+            tc.jitter[2] = config.taa_unjitter ? 1.0f : 0.0f;
+            tc.jitter[3] = config.taa_reconstruction ? 1.0f : 0.0f;
+            tc.blend[0] = config.taa_history_weight;
+            tc.blend[1] = config.taa_history_weight_motion;
+            tc.blend[2] = reset ? 1.0f : 0.0f;
+            tc.blend[3] = config.taa_clip_gamma;
+            tc.flicker[0] = config.taa_anti_flicker ? 1.0f : 0.0f;
+            tc.flicker[1] = config.taa_history_weight_min;
+            tc.flicker[2] = config.taa_clip_gamma_static;
+            tc.flicker[3] = config.taa_soft_offscreen ? 1.0f : 0.0f;
+            tc.hdr[0] = config.taa_hdr_scale;
+        }
+
+
+        // EDAA TAA as the upscaler (gpu_mutex held, caller saves the pipeline
+        // state): typed game image in upscale_input + motion vectors + depth +
+        // HUD mask + display-size history -> next history, drawn into 'target_view'.
+        bool run_taau(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* target_view, uint32_t display_w, uint32_t display_h,
+            const settings& config, bool reset)
+        {
+            for (target& h : gpu.taau_history) {
+                if (!has_size(h, display_w, display_h)) {
+                    if (!create_texture(display_w, display_h, DXGI_FORMAT_R16G16B16A16_FLOAT, h, 0)) {
+                        return false;
+                    }
+
+                    reset = true;
+                }
+            }
+
+            taa_constants tc = {};
+            fill_taa_constants(tc, config, upscale_in.render_w, upscale_in.render_h, upscale_in.jitter_x, upscale_in.jitter_y, reset);
+            tc.display_size[0] = static_cast<float>(display_w);
+            tc.display_size[1] = static_cast<float>(display_h);
+            tc.display_size[2] = 1.0f / tc.display_size[0];
+            tc.display_size[3] = 1.0f / tc.display_size[1];
+            tc.sharpen[0] = config.upscale_sharpness;
+
+            if (!upload(ctx, gpu.taa_cb.Get(), tc)) {
+                return false;
+            }
+
+            const target& prev = gpu.taau_history[gpu.taau_index];
+            const target& next = gpu.taau_history[1 - gpu.taau_index];
+            bind_fullscreen(ctx);
+            set_viewport(ctx, static_cast<float>(display_w), static_cast<float>(display_h));
+            bind_srvs(ctx, {});
+            ID3D11RenderTargetView* const taau_target[] = { next.rtv.Get() };
+            ctx->OMSetRenderTargets(1, taau_target, nullptr);
+            ID3D11Buffer* const cb[] = { gpu.taa_cb.Get() };
+            ctx->PSSetConstantBuffers(0, 1, cb);
+            bind_srvs(ctx, { gpu.upscale_input.srv.Get(), prev.srv.Get(), gpu.motion.srv.Get(), gpu.depth.srv.Get(), upscale_in.hud_mask ? gpu.hud_mask.srv.Get() : nullptr });
+            ctx->PSSetShader(gpu.ps_taau.Get(), nullptr, 0);
+            ctx->Draw(3, 0);
+
+            // Sharpened into the game's own target view, whatever the back buffer format.
+            bind_srvs(ctx, {});
+            ID3D11RenderTargetView* const targets[] = { target_view };
+            ctx->OMSetRenderTargets(1, targets, nullptr);
+            bind_srvs(ctx, { nullptr, next.srv.Get() });
+            ctx->PSSetShader(gpu.ps_sharpen.Get(), nullptr, 0);
+            ctx->Draw(3, 0);
+            gpu.taau_index = 1 - gpu.taau_index;
+            return true;
+        }
+
+
         // DLAA or XeSS: scene + depth + motion vectors -> upscaler_output, copied
         // into the game's scene target. Called from resolve() with gpu_mutex held.
         bool run_upscaler(ID3D11Device* device, ID3D11DeviceContext* ctx, const resolve_inputs& in, aa_method method)
@@ -832,20 +915,7 @@ namespace edaa
 
             // 2. TAA: scene + history -> other history buffer.
             taa_constants tc = {};
-            std::memcpy(tc.render_size, mc.render_size, sizeof(tc.render_size));
-            tc.jitter[0] = mc.params[0];
-            tc.jitter[1] = mc.params[1];
-            tc.jitter[2] = in.config.taa_unjitter ? 1.0f : 0.0f;
-            tc.jitter[3] = in.config.taa_reconstruction ? 1.0f : 0.0f;
-            tc.blend[0] = in.config.taa_history_weight;
-            tc.blend[1] = in.config.taa_history_weight_motion;
-            tc.blend[2] = (!gpu.history_valid || in.camera_cut) ? 1.0f : 0.0f;
-            tc.blend[3] = in.config.taa_clip_gamma;
-            tc.flicker[0] = in.config.taa_anti_flicker ? 1.0f : 0.0f;
-            tc.flicker[1] = in.config.taa_history_weight_min;
-            tc.flicker[2] = in.config.taa_clip_gamma_static;
-            tc.flicker[3] = in.config.taa_soft_offscreen ? 1.0f : 0.0f;
-            tc.hdr[0] = in.config.taa_hdr_scale;
+            fill_taa_constants(tc, in.config, in.render_w, in.render_h, in.jitter_x, in.jitter_y, !gpu.history_valid || in.camera_cut);
 
             if (!upload(ctx, gpu.taa_cb.Get(), tc)) {
                 return "cannot update constants";
@@ -1107,7 +1177,8 @@ namespace edaa
             const bool failed_here = f.render_w == s.render_w && f.render_h == s.render_h && f.display_w == s.back_buffer_w &&
                 f.display_h == s.back_buffer_h && s.frame < f.frame + upscale_retry_frames;
             const bool backend = (s.config.upscaling == static_cast<int>(upscaler::dlss) && dlss::availability() == 1) ||
-                (s.config.upscaling == static_cast<int>(upscaler::xess) && xess::availability() == 1);
+                (s.config.upscaling == static_cast<int>(upscaler::xess) && xess::availability() == 1) ||
+                s.config.upscaling == static_cast<int>(upscaler::taa);
             in.upscaling = s.config.taa_enabled && backend && s.render_w < s.back_buffer_w && !failed_here;
         }
 
@@ -1137,7 +1208,9 @@ namespace edaa
             s.motion_status = error;
         }
         else if (in.upscaling) {
-            s.motion_status = in.config.upscaling == static_cast<int>(upscaler::xess) ? "ok (Intel XeSS upscaling)" : "ok (NVIDIA DLSS upscaling)";
+            s.motion_status = in.config.upscaling == static_cast<int>(upscaler::xess) ? "ok (Intel XeSS upscaling)"
+                : in.config.upscaling == static_cast<int>(upscaler::taa)              ? "ok (EDAA TAA upscaling)"
+                                                                                      : "ok (NVIDIA DLSS upscaling)";
         }
         else if (!in.config.taa_enabled) {
             s.motion_status = "ok (motion vectors only)";
@@ -1206,8 +1279,10 @@ namespace edaa
         uint64_t frame, last_image;
         bool jitter_flip;
         int backend;
+        settings config;
         {
             const std::lock_guard<std::recursive_mutex> lock(s.mutex);
+            config = s.config;
             render_w = s.render_w;
             render_h = s.render_h;
             display_w = s.back_buffer_w;
@@ -1263,7 +1338,7 @@ namespace edaa
                 upscale_in.render_h != render_h) {
                 error = "no motion vectors this frame";
             }
-            else if ((!has_size(gpu.upscale_output, display_w, display_h) &&
+            else if ((backend != static_cast<int>(upscaler::taa) && !has_size(gpu.upscale_output, display_w, display_h) &&
                          !create_texture(display_w, display_h, DXGI_FORMAT_R8G8B8A8_UNORM, gpu.upscale_output, D3D11_BIND_UNORDERED_ACCESS)) ||
                 (!has_size(gpu.upscale_input, render_w, render_h) &&
                     !create_texture(render_w, render_h, DXGI_FORMAT_R8G8B8A8_UNORM, gpu.upscale_input, 0))) {
@@ -1296,36 +1371,46 @@ namespace edaa
                 u.hud_mask = upscale_in.hud_mask ? gpu.hud_mask.tex.Get() : nullptr;
                 const bool use_xess = backend == static_cast<int>(upscaler::xess);
 
-                // XeSS reads a typed R32_FLOAT depth (the game's is D32S8): copy it with a draw.
-                if (use_xess && (gpu.depth_copy.tex || create_target(DXGI_FORMAT_R32_FLOAT, gpu.depth_copy))) {
-                    bind_fullscreen(ctx);
-                    set_viewport(ctx, static_cast<float>(render_w), static_cast<float>(render_h));
-                    bind_srvs(ctx, {});
-                    ID3D11RenderTargetView* const depth_target[] = { gpu.depth_copy.rtv.Get() };
-                    ctx->OMSetRenderTargets(1, depth_target, nullptr);
-                    bind_srvs(ctx, { nullptr, gpu.depth.srv.Get() });
-                    ctx->PSSetShader(gpu.ps_copy.Get(), nullptr, 0);
-                    ctx->Draw(3, 0);
-                    u.depth = gpu.depth_copy.tex.Get();
-                }
-
-                bind_srvs(ctx, {});
-                ctx->OMSetRenderTargets(0, nullptr, nullptr);
-
-                if (use_xess ? xess::upscale(device, ctx, u) : dlss::upscale(device, ctx, u)) {
-                    // Into the game's own target view, whatever the back buffer format.
-                    gpu.upscale_frame = frame;
-                    bind_fullscreen(ctx);
-                    set_viewport(ctx, static_cast<float>(display_w), static_cast<float>(display_h));
-                    ID3D11RenderTargetView* const targets[] = { target_view.Get() };
-                    ctx->OMSetRenderTargets(1, targets, nullptr);
-                    bind_srvs(ctx, { nullptr, gpu.upscale_output.srv.Get() });
-                    ctx->PSSetShader(gpu.ps_copy.Get(), nullptr, 0);
-                    ctx->Draw(3, 0);
+                if (backend == static_cast<int>(upscaler::taa)) {
+                    if (run_taau(ctx, target_view.Get(), display_w, display_h, config, u.reset)) {
+                        gpu.upscale_frame = frame;
+                    }
+                    else {
+                        error = "EDAA TAA could not upscale (cannot create its textures)";
+                    }
                 }
                 else {
-                    error = use_xess ? "XeSS could not upscale (see the XeSS line and ReShade.log)"
-                                     : "DLSS could not upscale (see the DLSS line and ReShade.log)";
+                    // XeSS reads a typed R32_FLOAT depth (the game's is D32S8): copy it with a draw.
+                    if (use_xess && (gpu.depth_copy.tex || create_target(DXGI_FORMAT_R32_FLOAT, gpu.depth_copy))) {
+                        bind_fullscreen(ctx);
+                        set_viewport(ctx, static_cast<float>(render_w), static_cast<float>(render_h));
+                        bind_srvs(ctx, {});
+                        ID3D11RenderTargetView* const depth_target[] = { gpu.depth_copy.rtv.Get() };
+                        ctx->OMSetRenderTargets(1, depth_target, nullptr);
+                        bind_srvs(ctx, { nullptr, gpu.depth.srv.Get() });
+                        ctx->PSSetShader(gpu.ps_copy.Get(), nullptr, 0);
+                        ctx->Draw(3, 0);
+                        u.depth = gpu.depth_copy.tex.Get();
+                    }
+
+                    bind_srvs(ctx, {});
+                    ctx->OMSetRenderTargets(0, nullptr, nullptr);
+
+                    if (use_xess ? xess::upscale(device, ctx, u) : dlss::upscale(device, ctx, u)) {
+                        // Into the game's own target view, whatever the back buffer format.
+                        gpu.upscale_frame = frame;
+                        bind_fullscreen(ctx);
+                        set_viewport(ctx, static_cast<float>(display_w), static_cast<float>(display_h));
+                        ID3D11RenderTargetView* const targets[] = { target_view.Get() };
+                        ctx->OMSetRenderTargets(1, targets, nullptr);
+                        bind_srvs(ctx, { nullptr, gpu.upscale_output.srv.Get() });
+                        ctx->PSSetShader(gpu.ps_copy.Get(), nullptr, 0);
+                        ctx->Draw(3, 0);
+                    }
+                    else {
+                        error = use_xess ? "XeSS could not upscale (see the XeSS line and ReShade.log)"
+                                         : "DLSS could not upscale (see the DLSS line and ReShade.log)";
+                    }
                 }
             }
         }
@@ -1341,7 +1426,9 @@ namespace edaa
             upscale_failed = { render_w, render_h, display_w, display_h, frame };
             reshade::log::message(reshade::log::level::warning,
                 (std::string("EDAA: upscaling paused: ") + error +
-                    (backend == static_cast<int>(upscaler::xess) ? " (XeSS: " + xess::status() : " (DLSS: " + dlss::status()) + ")")
+                    (backend == static_cast<int>(upscaler::xess)         ? " (XeSS: " + xess::status() + ")"
+                            : backend == static_cast<int>(upscaler::taa) ? std::string()
+                                                                         : " (DLSS: " + dlss::status() + ")"))
                     .c_str());
         }
 

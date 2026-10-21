@@ -38,6 +38,7 @@ namespace edaa
         game = 0, // the game's own (bilinear or FSR), after the anti-aliasing above
         dlss = 1, // NVIDIA DLSS on the tonemapped image (passes.cpp run_upscale)
         xess = 2, // Intel XeSS on the tonemapped image, through the D3D12 bridge
+        taa = 3, // EDAA TAA upscaling on the tonemapped image (taa.hlsl ps_taau)
     };
 
 
@@ -46,6 +47,7 @@ namespace edaa
         int aa_method = 0; // aa_method
         int upscaling = 0; // upscaler
         bool upscale_hud_mask = true; // upscaling: the cockpit HUD uses the current frame only (no trails)
+        float upscale_sharpness = 0.5f; // EDAA TAA upscaling: contrast-adaptive sharpening, 0..1
         bool upscale_mip_bias = true; // upscaling: scene textures sampled with the display resolution mips (mip_bias.cpp)
         float mip_bias_extra = 0; // developer, not saved: added to the upscaling mip bias
         bool upscaler_jitter_flip = false; // developer, not saved: negate the jitter passed to DLSS/XeSS (sign convention check)
@@ -176,7 +178,7 @@ namespace edaa
         uint32_t render_w = 0, render_h = 0;
         uint32_t back_buffer_w = 0, back_buffer_h = 0; // swap chain size, from Present (display size)
         int jitter_phases = 8; // Halton phases in use: the setting x (display / render)^2 when upscaling
-        bool upscaling_active = false; // last frame was upscaled by DLSS/XeSS: the method above is not used
+        bool upscaling_active = false; // last frame was upscaled (DLSS, XeSS or EDAA TAA): the method above is not used
         uint64_t scene_color = 0; // HDR scene target (G-buffer RT3, R11G11B10), resolved by TAA
         uint64_t depth_candidate = 0; // largest such depth buffer in the frame in progress
         uint64_t color_candidate = 0; // its HDR target

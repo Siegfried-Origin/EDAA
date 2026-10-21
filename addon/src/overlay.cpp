@@ -45,6 +45,7 @@ namespace edaa
             };
             const choice choices[] = {
                 { upscaler::game, "Game (bilinear or FSR)", 1 },
+                { upscaler::taa, "EDAA TAA", 1 },
                 { upscaler::dlss, "NVIDIA DLSS", dlss::availability() },
                 { upscaler::xess, "Intel XeSS", xess::availability() },
             };
@@ -94,8 +95,18 @@ namespace edaa
             edit(ImGui::Checkbox("HUD mask (cockpit HUD from the current frame: no trails)", &s.config.upscale_hud_mask));
             edit(ImGui::Checkbox("Texture mip bias (display resolution texture detail)", &s.config.upscale_mip_bias));
             ImGui::Text("Upscaling: %s", s.upscale_status);
-            ImGui::Text("%s: %s", use_xess ? "XeSS" : "DLSS", use_xess ? xess::status().c_str() : dlss::status().c_str());
+
+            if (shown->backend != upscaler::taa) {
+                ImGui::Text("%s: %s", use_xess ? "XeSS" : "DLSS", use_xess ? xess::status().c_str() : dlss::status().c_str());
+            }
+
             ImGui::Text("Jitter: %d phases, texture LOD bias %+.2f", s.jitter_phases, s.mip_bias_value.load());
+
+            if (shown->backend == upscaler::taa) {
+                edit(ImGui::SliderFloat("Sharpness", &s.config.upscale_sharpness, 0.0f, 1.0f, "%.2f"));
+                ImGui::TextUnformatted("Any scale works; the TAA settings (Advanced) apply.");
+                return;
+            }
 
             const upscale_info info = use_xess ? xess::info() : dlss::info();
 
@@ -184,7 +195,7 @@ namespace edaa
             ImGui::EndDisabled();
 
             if (s.upscaling_active) {
-                ImGui::TextDisabled("Not used while upscaling: DLSS/XeSS also do the anti-aliasing (see Upscaling).");
+                ImGui::TextDisabled("Not used while upscaling: the upscaler also does the anti-aliasing (see Upscaling).");
             }
 
             ImGui::Text("Status: %s", s.config.taa_enabled ? s.motion_status : "off");

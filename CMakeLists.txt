@@ -36,7 +36,9 @@ add_custom_command(
 	COMMAND ${FXC} /nologo /O3 /T ps_5_0 /E ps_taa /Vn g_ps_taa /Fh ${SHADER_OUT}/ps_taa.h ${TAA_SRC}
 	COMMAND ${FXC} /nologo /O3 /T ps_5_0 /E ps_copy /Vn g_ps_copy /Fh ${SHADER_OUT}/ps_copy.h ${TAA_SRC}
 	COMMAND ${FXC} /nologo /O3 /T ps_5_0 /E ps_hud_mask /Vn g_ps_hud_mask /Fh ${SHADER_OUT}/ps_hud_mask.h ${TAA_SRC}
-	COMMAND ${CMAKE_COMMAND} -DOUT=${TAA_HEADER} -DHEADERS=ps_taa.h,ps_copy.h,ps_hud_mask.h -P ${CMAKE_SOURCE_DIR}/addon/shaders/combine.cmake
+	COMMAND ${FXC} /nologo /O3 /T ps_5_0 /E ps_taau /Vn g_ps_taau /Fh ${SHADER_OUT}/ps_taau.h ${TAA_SRC}
+	COMMAND ${FXC} /nologo /O3 /T ps_5_0 /E ps_sharpen /Vn g_ps_sharpen /Fh ${SHADER_OUT}/ps_sharpen.h ${TAA_SRC}
+	COMMAND ${CMAKE_COMMAND} -DOUT=${TAA_HEADER} -DHEADERS=ps_taa.h,ps_copy.h,ps_hud_mask.h,ps_taau.h,ps_sharpen.h -P ${CMAKE_SOURCE_DIR}/addon/shaders/combine.cmake
 	DEPENDS ${TAA_SRC} ${CMAKE_SOURCE_DIR}/addon/shaders/combine.cmake
 	COMMENT "Compiling taa.hlsl"
 )

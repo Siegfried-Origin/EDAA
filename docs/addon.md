@@ -161,6 +161,20 @@ Per frame, in the order the game draws:
    LDR_INPUT_COLOR and RESPONSIVE_PIXEL_MASK: the HUD mask goes to the
    responsive mask (cleared when there is none). Depth is copied to
    R32_FLOAT first, as for XeSS Native AA.
+   EDAA TAA upscaling ("Upscaling" = EDAA TAA, `ps_taau`): same inputs
+   (typed copy of the tonemapped image, depth, motion vectors, HUD mask), a
+   display-size R16G16B16A16 history pair, output drawn into the game's
+   target. Input pixel q holds the scene at q + 0.5 - jitter; each output
+   pixel filters the 3x3 input samples around it (this frame's estimate, radius
+   1 input pixel) and adds it to the history in proportion to how close the
+   nearest sample fell (radius 1 output pixel), so the jitter sequence
+   (8 x ratio^2 phases) fills in the display resolution detail. Variance clip
+   from the input samples, history weights, anti-flicker and motion handling
+   are the TAA settings; HUD-mask pixels use the current frame only. Works at
+   any scale, no vendor library. Output through `ps_sharpen` (AMD CAS style,
+   option "Sharpness", 0.5). Known limit: grilles and details finer than the
+   render resolution still shimmer a little (neither a smaller mip bias nor a
+   heavier history helped).
 7. **At Present** (`passes.cpp`, `capture.cpp`): optional debug view over the
    back buffer, auto capture, next jitter phase.
 

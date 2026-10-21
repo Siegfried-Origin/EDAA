@@ -11,12 +11,15 @@ cbuffer taa_constants : register(b0)
     float4 blend; // x: history weight, y: history weight at high motion, z: reset (1 = no history), w: variance clip gamma
     float4 flicker; // x: anti-flicker on, y: minimum history weight, z: clip gamma for static pixels, w: soft off-screen on
     float4 hdr; // x: scale applied before the HDR compression (the scene is not exposed yet)
+    float4 display_size; // upscaling (ps_taau): w, h, 1/w, 1/h of the output
+    float4 sharpen; // upscaling (ps_sharpen): x: sharpness 0..1
 };
 
 Texture2D<float3> scene_color : register(t0);
 Texture2D<float4> history_tex : register(t1);
 Texture2D<float2> motion_tex : register(t2);
 Texture2D<float> scene_depth : register(t3);
+Texture2D<float> hud_mask_tex : register(t4); // upscaling: 1 where the cockpit HUD was drawn this frame
 SamplerState linear_clamp : register(s0);
 
 
@@ -57,9 +60,10 @@ float3 load_current(int2 p)
 
 
 // 5-tap Catmull-Rom history sample (bilinear taps, corners dropped).
-float3 sample_history(float2 uv)
+// size: the history's w, h, 1/w, 1/h.
+float3 sample_history(float2 uv, float4 size)
 {
-    const float2 pos = uv * render_size.xy;
+    const float2 pos = uv * size.xy;
     const float2 center = floor(pos - 0.5) + 0.5;
     const float2 f = pos - center;
     const float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
@@ -67,9 +71,9 @@ float3 sample_history(float2 uv)
     const float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
     const float2 w3 = f * f * (-0.5 + 0.5 * f);
     const float2 w12 = w1 + w2;
-    const float2 tc0 = (center - 1) * render_size.zw;
-    const float2 tc3 = (center + 2) * render_size.zw;
-    const float2 tc12 = (center + w2 / w12) * render_size.zw;
+    const float2 tc0 = (center - 1) * size.zw;
+    const float2 tc3 = (center + 2) * size.zw;
+    const float2 tc12 = (center + w2 / w12) * size.zw;
 
     float3 c = 0;
     c += history_tex.SampleLevel(linear_clamp, float2(tc12.x, tc0.y), 0).rgb * (w12.x * w0.y);
@@ -178,7 +182,7 @@ float4 ps_taa(float4 pos : SV_Position) : SV_Target
     float rejection = 1; // for the debug view: 0 = history fully kept, 1 = discarded
 
     if (history_weight > 0) {
-        const float3 raw = rgb_to_ycocg(tonemap(sample_history(history_uv)));
+        const float3 raw = rgb_to_ycocg(tonemap(sample_history(history_uv, render_size)));
         history = clip_aabb(raw, clip_min, clip_max);
         rejection = saturate(length(raw - history) * 8);
 
@@ -197,6 +201,130 @@ float4 ps_taa(float4 pos : SV_Position) : SV_Target
     const float3 result = (current * wc + history * wh) / max(wc + wh, 1e-5);
     // Clamp before inverting the compression (it diverges at 1): up to 1e5 / scale.
     return float4(untonemap(clamp(ycocg_to_rgb(result), 0, 0.99999)), rejection);
+}
+
+
+// Temporal upscaling (Upscaling = EDAA TAA): the game's tonemapped image at
+// render size (t0, LDR, jittered), the display-size history (t1), motion
+// vectors and depth at render size (t2, t3) and the HUD mask (t4) give the
+// display-size output. Input pixel q holds the scene at q + 0.5 - jitter (in
+// input pixels). An output pixel looks at the 3x3 input samples around it:
+// - weighted by their distance in input pixels: a soft estimate, used alone
+//   where there is no history;
+// - weighted by their distance in output pixels: a sharp estimate, and its
+//   total weight says how much this frame adds to the history (a sample right
+//   on the output pixel counts fully, a far one hardly). Over the jitter
+//   sequence (8 x ratio^2 phases) every output pixel gets close samples, which
+//   brings back the display resolution detail.
+float4 ps_taau(float4 pos : SV_Position) : SV_Target
+{
+    const float2 uv = pos.xy * display_size.zw;
+    const float2 in_pos = uv * render_size.xy;
+    const int2 center = int2(floor(in_pos));
+    const int2 last = int2(render_size.xy) - 1;
+    const float2 jitter_px = jitter.xy * render_size.xy;
+    const float scale = display_size.x * render_size.z; // output pixels per input pixel
+
+    float3 filtered = 0, sharp = 0, m1 = 0, m2 = 0, box_min = 1e9, box_max = -1e9;
+    float filter_weight = 0, sharp_weight = 0, best_depth = -1;
+    int2 best = clamp(center, int2(0, 0), last);
+
+    // clang-format off
+    [unroll] for (int y = -1; y <= 1; ++y) {
+        [unroll] for (int x = -1; x <= 1; ++x) {
+            const int2 q = clamp(center + int2(x, y), int2(0, 0), last);
+            const float3 c = rgb_to_ycocg(scene_color.Load(int3(q, 0)));
+            const float2 d = float2(center + int2(x, y)) + 0.5 - jitter_px - in_pos; // input pixels
+            const float d2 = dot(d, d);
+            const float w = exp(-2.29 * d2); // ~Blackman-Harris, radius 1 input pixel
+            filtered += c * w;
+            filter_weight += w;
+            const float ws = exp(-2.29 * d2 * scale * scale); // radius 1 output pixel
+            sharp += c * ws;
+            sharp_weight += ws;
+            m1 += c;
+            m2 += c * c;
+            box_min = min(box_min, c);
+            box_max = max(box_max, c);
+            const float depth = scene_depth.Load(int3(q, 0));
+
+            if (depth > best_depth) {
+                best_depth = depth;
+                best = q;
+            }
+        }
+    }
+    // clang-format on
+
+    const float3 current = filtered / max(filter_weight, 1e-5);
+    const float3 current_sharp = sharp_weight > 1e-4 ? sharp / sharp_weight : current;
+    const float confidence = saturate(sharp_weight);
+    const float2 motion = motion_tex.Load(int3(best, 0));
+    const float motion_px = length(motion * display_size.xy); // output pixels
+
+    // Variance clip from the input samples. The 3x3 min/max changes with every
+    // jitter phase: it limits moving pixels only (still ones would flicker).
+    const float3 mean = m1 / 9;
+    const float3 sigma = sqrt(max(m2 / 9 - mean * mean, 0));
+    const float moving = saturate(motion_px / 2);
+    const float gamma = lerp(flicker.z, blend.w, moving);
+    const float3 clip_min = lerp(mean - gamma * sigma, max(box_min, mean - gamma * sigma), moving);
+    const float3 clip_max = lerp(mean + gamma * sigma, min(box_max, mean + gamma * sigma), moving);
+
+    const float2 history_uv = uv + motion;
+    float history_weight = blend.x;
+
+    if (blend.z > 0 || any(history_uv < 0) || any(history_uv > 1) || hud_mask_tex.Load(int3(clamp(center, int2(0, 0), last), 0)) > 0.5) {
+        history_weight = 0; // no history, just entered the screen, or cockpit HUD drawn this frame
+    }
+
+    history_weight = lerp(history_weight, min(history_weight, blend.y), saturate(motion_px / 32));
+    float3 history = current;
+
+    if (history_weight > 0) {
+        history = clip_aabb(rgb_to_ycocg(sample_history(history_uv, display_size)), clip_min, clip_max);
+
+        if (flicker.x > 0) {
+            const float diff = abs(current.x - history.x) / max(max(current.x, history.x), 0.2);
+            const float agreement = 1 - saturate(diff);
+            history_weight = lerp(min(flicker.y, history_weight), history_weight, agreement * agreement);
+        }
+    }
+
+    // This frame's share: full without history (soft estimate), else the sharp
+    // estimate scaled by how close the samples fell.
+    const float alpha = history_weight > 0 ? (1 - history_weight) * confidence : 1;
+    const float3 added = history_weight > 0 ? current_sharp : current;
+    // Luminance-weighted blend (the input is already tonemapped: 1 / (1 + luma)).
+    const float wc = alpha / (1 + added.x);
+    const float wh = (1 - alpha) / (1 + history.x);
+    const float3 result = (added * wc + history * wh) / max(wc + wh, 1e-5);
+    return float4(saturate(ycocg_to_rgb(result)), 1);
+}
+
+
+// Upscaling output: the TAAU history (t1) with contrast-adaptive sharpening
+// (AMD CAS style): each pixel subtracts a share of its 4 neighbours, less where
+// the local contrast is already high (no halos), into the game target.
+float3 ps_sharpen(float4 pos : SV_Position) : SV_Target
+{
+    const int2 p = int2(pos.xy);
+    const int2 last = int2(display_size.xy) - 1;
+    const float3 c = history_tex.Load(int3(p, 0)).rgb;
+
+    if (sharpen.x <= 0) {
+        return c;
+    }
+
+    const float3 n = history_tex.Load(int3(clamp(p + int2(0, -1), int2(0, 0), last), 0)).rgb;
+    const float3 s = history_tex.Load(int3(clamp(p + int2(0, 1), int2(0, 0), last), 0)).rgb;
+    const float3 w = history_tex.Load(int3(clamp(p + int2(-1, 0), int2(0, 0), last), 0)).rgb;
+    const float3 e = history_tex.Load(int3(clamp(p + int2(1, 0), int2(0, 0), last), 0)).rgb;
+    const float3 lo = min(c, min(min(n, s), min(w, e)));
+    const float3 hi = max(c, max(max(n, s), max(w, e)));
+    const float3 amount = sqrt(saturate(min(lo, 1 - hi) / max(hi, 1e-4)));
+    const float3 weight = -amount / lerp(8.0, 5.0, sharpen.x);
+    return saturate((c + (n + s + w + e) * weight) / (1 + 4 * weight));
 }
 
 
