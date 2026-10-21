@@ -92,9 +92,10 @@ namespace edaa
 
             const bool use_xess = shown->backend == upscaler::xess;
             edit(ImGui::Checkbox("HUD mask (cockpit HUD from the current frame: no trails)", &s.config.upscale_hud_mask));
+            edit(ImGui::Checkbox("Texture mip bias (display resolution texture detail)", &s.config.upscale_mip_bias));
             ImGui::Text("Upscaling: %s", s.upscale_status);
             ImGui::Text("%s: %s", use_xess ? "XeSS" : "DLSS", use_xess ? xess::status().c_str() : dlss::status().c_str());
-            ImGui::Text("Jitter: %d phases", s.jitter_phases);
+            ImGui::Text("Jitter: %d phases, texture LOD bias %+.2f", s.jitter_phases, s.mip_bias_value.load());
 
             const upscale_info info = use_xess ? xess::info() : dlss::info();
 
@@ -292,8 +293,10 @@ namespace edaa
         {
             ImGui::Text("Resolve point: %s", s.resolve_point);
             // Draw hooks include the passes they run; Present is counted on the next frame.
-            ImGui::Text("Frame %.2f ms. EDAA CPU: draws %.2f (passes %.2f), binds %.2f, maps %.2f, present %.2f ms", s.frame_ms,
-                s.cpu_ms[0], s.cpu_ms[3], s.cpu_ms[1], s.cpu_ms[2], s.cpu_ms[4]);
+            ImGui::Text("Frame %.2f ms. EDAA CPU: draws %.2f (passes %.2f), binds %.2f, maps %.2f, present %.2f, mip bias %.2f ms",
+                s.frame_ms, s.cpu_ms[0], s.cpu_ms[3], s.cpu_ms[1], s.cpu_ms[2], s.cpu_ms[4], s.cpu_ms[5]);
+            ImGui::Text("Mip bias: %u sampler binds biased last frame", s.last_biased_binds);
+            edit(ImGui::SliderFloat("Upscaling: extra mip bias", &s.config.mip_bias_extra, -4.0f, 2.0f, "%+.1f"));
             ImGui::Text("Last frame: %u G-buffer binds, %u draws into the HDR target, exposure downsample %s, HUD shader %s, bloom shader %s",
                 s.last.gbuffer_binds, s.last.hdr_draws, s.last.exposure_downsample ? "yes" : "no",
                 s.last.hud_shader ? "yes" : "no", s.last.bloom_shader ? "yes" : "no");

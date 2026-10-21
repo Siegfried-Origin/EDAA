@@ -18,4 +18,7 @@ namespace edaa
 
     void register_shadow_fix_events();
     void unregister_shadow_fix_events();
+
+    void register_mip_bias_events();
+    void unregister_mip_bias_events();
 }

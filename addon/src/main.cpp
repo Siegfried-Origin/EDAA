@@ -112,6 +112,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
             edaa::register_object_events();
             edaa::register_pass_events();
             edaa::register_shadow_fix_events();
+            edaa::register_mip_bias_events();
             reshade::register_event<reshade::addon_event::reshade_present>(edaa::on_reshade_present);
             reshade::register_overlay("EDAA", edaa::draw_overlay);
             {
@@ -123,6 +124,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
         case DLL_PROCESS_DETACH:
             reshade::unregister_overlay("EDAA", edaa::draw_overlay);
             reshade::unregister_event<reshade::addon_event::reshade_present>(edaa::on_reshade_present);
+            edaa::unregister_mip_bias_events();
             edaa::unregister_shadow_fix_events();
             edaa::unregister_pass_events();
             edaa::unregister_object_events();

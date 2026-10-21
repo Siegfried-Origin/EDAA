@@ -46,6 +46,8 @@ namespace edaa
         int aa_method = 0; // aa_method
         int upscaling = 0; // upscaler
         bool upscale_hud_mask = true; // upscaling: the cockpit HUD uses the current frame only (no trails)
+        bool upscale_mip_bias = true; // upscaling: scene textures sampled with the display resolution mips (mip_bias.cpp)
+        float mip_bias_extra = 0; // developer, not saved: added to the upscaling mip bias
         bool upscaler_jitter_flip = false; // developer, not saved: negate the jitter passed to DLSS/XeSS (sign convention check)
         bool jitter_enabled = true; // follows taa_enabled unless changed in developer builds
         int jitter_phases = 8; // Halton(2,3) sequence length
@@ -230,13 +232,19 @@ namespace edaa
         int marker_count = 0;
 
         // Developer builds: CPU time of EDAA's handlers last frame (profile.hpp slots) and frame time.
-        float cpu_ms[5] = {};
+        float cpu_ms[6] = {};
         float frame_ms = 0;
 
         bool dump_requested = false; // overlay button: log the next frame's camera updates
         std::atomic<uint64_t> skip_ps = 0; // developer: draws with this pixel shader hash are skipped (0: none)
         std::atomic<uint64_t> skip_cs = 0; // developer: dispatches with this compute shader hash are skipped (0: none)
         std::atomic<bool> cycler_on = false; // developer: record the shaders used, for cycle_pass
+        // Mip bias (mip_bias.cpp), read at every sampler bind without the lock:
+        // on from the frame start to the resolve while upscaling.
+        std::atomic<bool> mip_bias_on = false;
+        std::atomic<float> mip_bias_value = 0.0f; // log2(render / display) + extra
+        std::atomic<uint32_t> biased_binds = 0; // sampler binds given the bias this frame
+        uint32_t last_biased_binds = 0; // same, last frame (overlay)
         std::atomic<bool> dumping = false; // logging the frame in progress (atomic: tested per draw without the lock)
     };
 

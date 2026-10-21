@@ -1071,6 +1071,7 @@ namespace edaa
             }
 
             s.resolved_this_frame = true;
+            s.mip_bias_on = false; // what follows is not upscaled with history
 
             if (s.dumping) {
                 reshade::log::message(reshade::log::level::info, "EDAA trace: ===== TAA RESOLVE HERE =====");

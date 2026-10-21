@@ -1006,11 +1006,18 @@ namespace edaa
         s.jitter_phases = std::max(1, s.config.jitter_phases);
 
         s.upscaling_active = upscaled;
+        s.last_biased_binds = s.biased_binds.exchange(0, std::memory_order_relaxed);
+        float bias = 0;
 
         if (upscaled && s.render_w != 0 && s.render_w < s.back_buffer_w) {
             const float ratio = static_cast<float>(s.back_buffer_w) / static_cast<float>(s.render_w);
             s.jitter_phases = static_cast<int>(std::ceil(static_cast<float>(s.jitter_phases) * ratio * ratio));
+            bias = s.config.upscale_mip_bias ? -std::log2(ratio) + s.config.mip_bias_extra : 0.0f;
         }
+
+        // Scene samplers biased until the resolve (cleared there).
+        s.mip_bias_value = bias;
+        s.mip_bias_on = bias != 0 && !s.map_mode && !s.screenshot_mode;
 
         // Next Halton(2,3) sample, centred on the pixel: [-0.5, 0.5).
         const uint32_t phases = static_cast<uint32_t>(s.jitter_phases);

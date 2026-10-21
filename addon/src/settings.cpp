@@ -54,6 +54,7 @@ namespace edaa
             EDAA_FIELD(aa_method, integer),
             EDAA_FIELD(upscaling, integer),
             EDAA_FIELD(upscale_hud_mask, boolean),
+            EDAA_FIELD(upscale_mip_bias, boolean),
         };
 #undef EDAA_FIELD
 

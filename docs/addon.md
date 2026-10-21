@@ -146,10 +146,14 @@ Per frame, in the order the game draws:
    (3x3 dilated) into an R8 render-size mask, passed to DLSS as the "bias
    current colour" mask: those pixels use the current frame only. Debug view
    "HUD mask (upscaling)" shows it in cyan.
-   No texture mip bias: the game's samplers have none (MipLODBias 0,
-   checked in game), but replacing them with biased copies at every bind
-   gave almost no visible gain (ED textures are mostly magnified at these
-   distances) for a CPU cost on every sampler bind; it was removed.
+   Texture mip bias (`mip_bias.cpp`, option "Texture mip bias", on): the
+   game's samplers have none (MipLODBias 0, checked in game), so while
+   upscaling each pixel shader sampler bound before the resolve is replaced
+   by a cached copy with `MipLODBias += log2(render / display)` (the display
+   resolution mips the upscalers expect). Not upscaling, the sampler bind
+   hook stops at one atomic test (`mip_bias_on`, set at the frame start,
+   cleared at the resolve): no lock, no device call. Developer builds show
+   its CPU time ("mip bias" in the profiler line) and the biased binds.
    XeSS upscaling ("Upscaling" = Intel XeSS): same path, through the D3D12
    bridge of 6c. Preset: the one whose input range
    (`xessGetOptimalInputResolution`, logged once per display size) contains

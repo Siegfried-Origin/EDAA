@@ -17,6 +17,7 @@ namespace edaa::profile
         maps, // buffer Map/Unmap (camera, instance records)
         passes, // resolve, upscale and HUD mask passes
         present, // Present (camera, objects, debug view, capture)
+        samplers, // sampler binds given a mip bias (upscaling only)
         count
     };
 
