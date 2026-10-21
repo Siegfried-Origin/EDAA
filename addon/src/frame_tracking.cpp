@@ -913,6 +913,13 @@ namespace edaa
         }
 
 
+        // In stations the tiled lighting runs through DispatchIndirect: same handling.
+        bool on_indirect(command_list* cmd_list, indirect_command type, resource, uint64_t, uint32_t, uint32_t)
+        {
+            return type == indirect_command::dispatch && on_dispatch(cmd_list, 0, 0, 0);
+        }
+
+
         bool on_draw(command_list* cmd_list, uint32_t vertex_count, uint32_t instance_count, uint32_t, uint32_t)
         {
             EDAA_PROFILE(draws);
@@ -1070,6 +1077,7 @@ namespace edaa
         reshade::register_event<reshade::addon_event::draw>(on_draw);
         reshade::register_event<reshade::addon_event::draw_indexed>(on_draw_indexed);
         reshade::register_event<reshade::addon_event::dispatch>(on_dispatch);
+        reshade::register_event<reshade::addon_event::draw_or_dispatch_indirect>(on_indirect);
     }
 
 
@@ -1085,5 +1093,6 @@ namespace edaa
         reshade::unregister_event<reshade::addon_event::draw>(on_draw);
         reshade::unregister_event<reshade::addon_event::draw_indexed>(on_draw_indexed);
         reshade::unregister_event<reshade::addon_event::dispatch>(on_dispatch);
+        reshade::unregister_event<reshade::addon_event::draw_or_dispatch_indirect>(on_indirect);
     }
 }

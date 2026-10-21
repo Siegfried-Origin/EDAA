@@ -296,9 +296,14 @@ defaults" restores the values below. The debug view always starts off.
   The tiled lighting of local lights (compute shaders `932e687ab8739aeb`,
   `a6542bbe3011f87f`, `b499f7667d34932c`, `083dc2646abe2d51`) has the same
   flaw with thread ids: `uv = (pixel + 0.5) / size`, ray row i =
-  `dot(cb0[10 + i].xyw, (u, v, 1))`; at their Dispatch, `cb0[10..12].w`
+  `dot(cb0[10 + i].xyw, (u, v, 1))`; at their dispatch, `cb0[10..12].w`
   gets `- jx / w * x - jy / h * y` the same way (station interiors lit by
-  local lights flickered below 1x).
+  local lights flickered below 1x). Stations launch them with
+  `DispatchIndirect`, hooked as well (`draw_or_dispatch_indirect`). The
+  ambient occlusion (`403797e056b7801d`, view.xy = `(uv * cb0[4].xy +
+  cb0[4].zw) * z`) gets `cb0[4].zw += -j / size * cb0[4].xy`.
+  What remains: the light right next to a strip light (`5a221a56fe342ec9`)
+  changes so fast that it still flickers a little in motion below 1x.
 * Map detection takes effect one frame after the map appears (one frame
   with jitter when it opens). The galaxy map is not flagged as a map but
   is not affected either: it has no G-buffer scene with a main camera, so

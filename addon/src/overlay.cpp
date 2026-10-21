@@ -127,7 +127,6 @@ namespace edaa
             }
 
             ImGui::TextUnformatted("Scale: the in-game supersampling closest to the mode's optimal size.");
-            ImGui::TextUnformatted("Below 1x, sun shadow edges flicker with the jitter (lower shadow quality reduces it).");
         }
 
 
