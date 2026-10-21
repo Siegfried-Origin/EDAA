@@ -15,14 +15,17 @@
 //    target after the resolve (see check_upscale_draw).
 //  * Frame trace for diagnostics (one frame of binds and draws in the log).
 
+#include "profile.hpp"
 #include "events.hpp"
 #include "state.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 using namespace reshade::api;
 
@@ -46,6 +49,7 @@ namespace edaa
             format rt0_format = format::unknown;
             // Frame trace (diagnostics)
             uint64_t ps_hash = 0;
+            uint64_t cs_hash = 0; // bound compute shader (lighting jitter fix, frame trace)
             bool blend_on = false, depth_write = false;
             int depth_func = -1; // compare_op of the bound depth state, -1 = depth test off
             uint32_t trace_lines = 0;
@@ -70,6 +74,21 @@ namespace edaa
         // 3DMigoto fork hides). Seen in the live frame trace in the last group
         // of draws into the HDR scene, after the exposure downsample.
         constexpr uint64_t hud_ps_hash = 0xb4523c39a461fd35ull;
+        // Sun shadow mask pass: rebuilds positions from SV_Position (shadow_fix.cpp).
+        constexpr uint64_t sun_shadow_ps = 0x77cb0c225019d08bull;
+        // Tiled lighting of local lights: same ray layout in all four (shadow_fix.cpp).
+        constexpr uint64_t tiled_lighting_cs[] = { 0x932e687ab8739aebull, 0xa6542bbe3011f87full, 0xb499f7667d34932cull, 0x083dc2646abe2d51ull };
+        // Ambient occlusion (HBAO+ style, on deinterleaved depth).
+        constexpr uint64_t occlusion_cs = 0x403797e056b7801dull;
+        std::unordered_map<uint64_t, uint64_t> compute_hashes; // compute pipeline -> shader hash
+
+
+        bool is_tiled_lighting(uint64_t hash)
+        {
+            return std::find(std::begin(tiled_lighting_cs), std::end(tiled_lighting_cs), hash) != std::end(tiled_lighting_cs);
+        }
+
+
         // System map pixel shaders (orbits, bodies, rings), drawn on every map
         // frame and in no other captured frame (sysmap.rdc).
         constexpr uint64_t map_ps_hashes[] = { 0xd7e5ff175bc127a8ull, 0xf5938f31368af521ull, 0x723db111682fbc7bull };
@@ -101,6 +120,29 @@ namespace edaa
         }
 
 
+        // Last context looked up on this thread: ReShade's private data is a COM
+        // GetPrivateData call, and the game draws thousands of times per frame on
+        // one context. Any command list creation or destruction invalidates every cache.
+        std::atomic<uint32_t> contexts_generation{ 0 };
+
+
+        context_state* context_of(command_list* cmd_list)
+        {
+            thread_local command_list* cached_list = nullptr;
+            thread_local context_state* cached_state = nullptr;
+            thread_local uint32_t cached_generation = ~0u;
+            const uint32_t generation = contexts_generation.load(std::memory_order_acquire);
+
+            if (cmd_list != cached_list || generation != cached_generation) {
+                cached_state = cmd_list->get_private_data<context_state>();
+                cached_list = cmd_list;
+                cached_generation = generation;
+            }
+
+            return cached_state;
+        }
+
+
         void on_init_command_list(command_list* cmd_list)
         {
             if (!is_game_device(cmd_list->get_device())) {
@@ -108,6 +150,7 @@ namespace edaa
             }
 
             cmd_list->create_private_data<context_state>();
+            contexts_generation.fetch_add(1, std::memory_order_acq_rel); // a cached "none" for this list is stale
         }
 
 
@@ -117,6 +160,7 @@ namespace edaa
                 return;
             }
 
+            contexts_generation.fetch_add(1, std::memory_order_acq_rel);
             cmd_list->destroy_private_data<context_state>();
         }
 
@@ -128,6 +172,16 @@ namespace edaa
             }
 
             for (uint32_t i = 0; i < count; ++i) {
+                if (subobjects[i].type == pipeline_subobject_type::compute_shader && subobjects[i].data != nullptr) {
+                    const auto& desc = *static_cast<const shader_desc*>(subobjects[i].data);
+                    const uint64_t hash = desc.code != nullptr ? shader_hash(desc.code, desc.code_size) : 0;
+
+                    const std::lock_guard<std::mutex> lock(pipelines_mutex);
+                    compute_hashes[pipeline.handle] = hash;
+
+                    continue;
+                }
+
                 if (subobjects[i].type == pipeline_subobject_type::pixel_shader && subobjects[i].data != nullptr) {
                     const auto& desc = *static_cast<const shader_desc*>(subobjects[i].data);
                     const uint64_t hash = desc.code != nullptr ? shader_hash(desc.code, desc.code_size) : 0;
@@ -192,21 +246,24 @@ namespace edaa
             depth_writes.erase(pipeline.handle);
             depth_funcs.erase(pipeline.handle);
             hud_shaders.erase(pipeline.handle);
+            compute_hashes.erase(pipeline.handle);
             map_shaders.erase(pipeline.handle);
         }
 
 
         void on_bind_pipeline(command_list* cmd_list, pipeline_stage stages, pipeline pipeline)
         {
+            EDAA_PROFILE(binds);
             const bool depth = (stages & pipeline_stage::depth_stencil) != 0;
             const bool pixel = (stages & pipeline_stage::pixel_shader) != 0;
             const bool blend = (stages & pipeline_stage::output_merger) != 0;
+            const bool compute = (stages & pipeline_stage::compute_shader) != 0;
 
-            if (!depth && !pixel && !blend) {
+            if (!depth && !pixel && !blend && !compute) {
                 return;
             }
 
-            auto* ctx = cmd_list->get_private_data<context_state>();
+            auto* ctx = context_of(cmd_list);
 
             if (ctx == nullptr) {
                 return;
@@ -226,6 +283,11 @@ namespace edaa
             if (blend) {
                 const auto it = blend_states.find(pipeline.handle);
                 ctx->blend_on = it != blend_states.end() && it->second;
+            }
+
+            if (compute) {
+                const auto h = compute_hashes.find(pipeline.handle);
+                ctx->cs_hash = h != compute_hashes.end() ? h->second : 0;
             }
 
             if (pixel) {
@@ -280,12 +342,13 @@ namespace edaa
         bool tracing(context_state* ctx)
         {
             addon_state& s = state();
-            const std::lock_guard<std::recursive_mutex> lock(s.mutex);
 
-            if (!s.dumping) {
+            if (!s.dumping) { // without the lock: called for every draw and bind
                 ctx->trace_lines = 0;
                 return false;
             }
+
+            const std::lock_guard<std::recursive_mutex> lock(s.mutex);
 
             return ctx->trace_lines < 20000;
         }
@@ -364,7 +427,8 @@ namespace edaa
 
         void on_bind_render_targets(command_list* cmd_list, uint32_t count, const resource_view* rtvs, resource_view dsv)
         {
-            auto* ctx = cmd_list->get_private_data<context_state>();
+            EDAA_PROFILE(binds);
+            auto* ctx = context_of(cmd_list);
 
             if (ctx == nullptr) {
                 return;
@@ -461,7 +525,8 @@ namespace edaa
 
         void on_bind_viewports(command_list* cmd_list, uint32_t first, uint32_t count, const viewport* viewports)
         {
-            auto* ctx = cmd_list->get_private_data<context_state>();
+            EDAA_PROFILE(binds);
+            auto* ctx = context_of(cmd_list);
 
             if (ctx == nullptr || first != 0 || count == 0) {
                 return;
@@ -474,50 +539,50 @@ namespace edaa
 
 
         // Binds the jittered or the original viewport before a draw, as needed.
-        void update_viewport(command_list* cmd_list, bool fullscreen_triangle, bool single_quad = false)
+        // Whether this draw gets the jittered viewport (state locked). Counts the scene draws.
+        bool jitter_decision(addon_state& s, context_state* ctx, bool fullscreen_triangle, bool single_quad, bool resolving)
         {
-            auto* ctx = cmd_list->get_private_data<context_state>();
-
-            if (ctx == nullptr || !ctx->has_viewport) {
-                return;
+            if (!ctx->has_viewport) {
+                return false;
             }
 
-            addon_state& s = state();
-            bool want;
-            float jx, jy;
-            {
-                const std::lock_guard<std::recursive_mutex> lock(s.mutex);
-                const bool scene_draw = ctx->scene_targets && ctx->depth_test_ok && !fullscreen_triangle &&
-                    ctx->game_viewport.width == static_cast<float>(s.render_w) &&
-                    ctx->game_viewport.height == static_cast<float>(s.render_h);
-                // Also jitter the other draws into the scene before the resolve: decal
-                // and light volumes (LESS_EQUAL test on back faces), glows and sky
-                // meshes without depth test. Left unjittered over jittered surfaces,
-                // they z-fight and flicker (station signs, lamps).
-                // Not single 4-vertex quads: the fog composite is one, drawn fullscreen.
-                const bool overlay_draw = s.config.jitter_overlay_draws && !fullscreen_triangle && !single_quad &&
-                    (ctx->scene_targets || (ctx->rt0 != 0 && ctx->rt0 == s.scene_color)) &&
-                    ctx->game_viewport.width == static_cast<float>(s.render_w) &&
-                    ctx->game_viewport.height == static_cast<float>(s.render_h);
-                // Nothing drawn after the TAA resolve is accumulated: do not jitter it.
-                want = (scene_draw || overlay_draw) && s.config.jitter_enabled && s.jitter_allowed && !s.resolved_this_frame && !s.map_mode &&
-                    !s.screenshot_mode;
-                jx = s.jitter_x;
-                jy = s.jitter_y;
+            const bool full_viewport = ctx->game_viewport.width == static_cast<float>(s.render_w) &&
+                ctx->game_viewport.height == static_cast<float>(s.render_h);
+            const bool scene_draw = ctx->scene_targets && ctx->depth_test_ok && !fullscreen_triangle && full_viewport;
+            // Also jitter the other draws into the scene before the resolve: decal
+            // and light volumes (LESS_EQUAL test on back faces), glows and sky
+            // meshes without depth test. Left unjittered over jittered surfaces,
+            // they z-fight and flicker (station signs, lamps).
+            // Not single 4-vertex quads: the fog composite is one, drawn fullscreen.
+            const bool overlay_draw = s.config.jitter_overlay_draws && !fullscreen_triangle && !single_quad &&
+                (ctx->scene_targets || (ctx->rt0 != 0 && ctx->rt0 == s.scene_color)) && full_viewport;
+            // Nothing drawn after the TAA resolve is accumulated: do not jitter it.
+            const bool want = (scene_draw || overlay_draw) && s.config.jitter_enabled && s.jitter_allowed && !s.resolved_this_frame &&
+                !resolving && !s.map_mode && !s.screenshot_mode;
 
-                if (scene_draw) {
-                    s.current.scene_draws++;
+            if (scene_draw) {
+                s.current.scene_draws++;
 
-                    if (ctx->rt0 != s.scene_color) {
-                        s.current.gbuffer_draws++;
-                    }
-
-                    count_scene_camera(s);
+                if (ctx->rt0 != s.scene_color) {
+                    s.current.gbuffer_draws++;
                 }
 
-                if (want) {
-                    s.current.jittered_draws++;
-                }
+                count_scene_camera(s);
+            }
+
+            if (want) {
+                s.current.jittered_draws++;
+            }
+
+            return want;
+        }
+
+
+        // Binds the jittered or the original viewport before a draw, as needed (no lock).
+        void apply_viewport(command_list* cmd_list, context_state* ctx, bool want, float jx, float jy)
+        {
+            if (!ctx->has_viewport) {
+                return;
             }
 
             if (want == ctx->jitter_applied) {
@@ -545,18 +610,15 @@ namespace edaa
         // scene after the exposure downsample, or the first HUD shader draw),
         // so the HUD is drawn after the TAA: neither jittered nor accumulated.
         // Fallback / option off: right before the first bloom downsample.
-        void check_resolve_point(command_list* cmd_list)
+        // Also decides this draw's jitter (want, jx, jy), under the same lock.
+        void check_resolve_point(command_list* cmd_list, context_state* ctx, bool fullscreen, bool single_quad, bool& want, float& jx, float& jy)
         {
-            auto* ctx = cmd_list->get_private_data<context_state>();
-
-            if (ctx == nullptr) {
-                return;
-            }
-
             const char* point = nullptr;
             {
                 addon_state& s = state();
                 const std::lock_guard<std::recursive_mutex> lock(s.mutex);
+                jx = s.jitter_x;
+                jy = s.jitter_y;
 
                 if (ctx->map_ps) {
                     s.current.map_shader_drawn = true;
@@ -576,6 +638,7 @@ namespace edaa
 
                 // Maps (system, galaxy): no TAA, no jitter.
                 if (s.resolved_this_frame || s.render_w == 0 || s.map_mode || s.screenshot_mode) {
+                    want = jitter_decision(s, ctx, fullscreen, single_quad, false);
                     return;
                 }
 
@@ -607,6 +670,8 @@ namespace edaa
                 if (point != nullptr) {
                     s.resolve_point = point;
                 }
+
+                want = jitter_decision(s, ctx, fullscreen, single_quad, point != nullptr);
             }
 
             if (point != nullptr) {
@@ -618,11 +683,13 @@ namespace edaa
         // When rendering below the display size, the game draws its tonemapped,
         // render-size image into the back buffer (bilinear or FSR) before the 2D
         // UI. Only that first draw into a display-size target is examined.
-        bool check_upscale_draw(command_list* cmd_list)
+        bool check_upscale_draw(command_list* cmd_list, context_state* ctx)
         {
-            auto* ctx = cmd_list->get_private_data<context_state>();
-
             if (ctx == nullptr) {
+                return false;
+            }
+
+            if (!state().upscale_pending) {
                 return false;
             }
 
@@ -644,11 +711,9 @@ namespace edaa
 
         // Upscaling: the first bloom downsample draw follows the cockpit HUD,
         // the last thing drawn into the scene: time to build the HUD mask.
-        void check_hud_mask(command_list* cmd_list)
+        void check_hud_mask(command_list* cmd_list, context_state* ctx)
         {
-            auto* ctx = cmd_list->get_private_data<context_state>();
-
-            if (ctx == nullptr || !ctx->resolve_ps) {
+            if (ctx == nullptr || !ctx->resolve_ps || !state().upscale_pending) {
                 return;
             }
 
@@ -669,11 +734,9 @@ namespace edaa
 
         // Before each draw: a fullscreen pass drawn into the scene after the
         // resolve has completed, the HUD mask snapshot is taken again.
-        void check_hud_snapshot(command_list* cmd_list, bool fullscreen)
+        void check_hud_snapshot(command_list* cmd_list, context_state* ctx, bool fullscreen)
         {
-            auto* ctx = cmd_list->get_private_data<context_state>();
-
-            if (ctx == nullptr) {
+            if (ctx == nullptr || !state().upscale_pending) {
                 return;
             }
 
@@ -696,44 +759,172 @@ namespace edaa
         }
 
 
-        bool on_draw(command_list* cmd_list, uint32_t vertex_count, uint32_t instance_count, uint32_t, uint32_t)
+        // The game's cb2 comes back after the sun shadow draw; that draw gets
+        // the jittered copy when the frame is jittered.
+        void check_sun_shadows(command_list* cmd_list, context_state* ctx)
         {
-            const bool fullscreen = vertex_count == 3 && instance_count == 1;
-            check_resolve_point(cmd_list);
-            check_hud_snapshot(cmd_list, fullscreen);
-            check_hud_mask(cmd_list);
+            if (ctx->ps_hash != sun_shadow_ps) {
+                return;
+            }
 
-            if (check_upscale_draw(cmd_list)) {
+            float jx, jy;
+            uint32_t w, h;
+            {
+                addon_state& s = state();
+                const std::lock_guard<std::recursive_mutex> lock(s.mutex);
+
+                if (!s.config.fix_sun_shadows || !s.config.jitter_enabled || !s.jitter_allowed || s.resolved_this_frame || s.map_mode ||
+                    s.screenshot_mode) {
+                    return;
+                }
+
+                jx = s.jitter_x;
+                jy = s.jitter_y;
+                w = s.render_w;
+                h = s.render_h;
+                s.current.shadow_fixes++;
+            }
+
+            fix_shadow_constants(cmd_list, jx, jy, w, h);
+        }
+
+
+        // Every check of a draw, with the context state looked up once.
+        // Developer pass cycler: every shader the game uses, in order of first use.
+        struct cycled_shader
+        {
+            uint64_t hash;
+            bool compute;
+        };
+
+        std::mutex cycler_mutex;
+        std::vector<cycled_shader> cycler_list;
+        int cycler_index = -1; // skipped entry, -1: none
+
+
+        void cycler_record(uint64_t hash, bool compute)
+        {
+            if (hash == 0 || !state().cycler_on.load(std::memory_order_relaxed)) {
+                return;
+            }
+
+            const std::lock_guard<std::mutex> lock(cycler_mutex);
+
+            for (const cycled_shader& c : cycler_list) {
+                if (c.hash == hash && c.compute == compute) {
+                    return;
+                }
+            }
+
+            cycler_list.push_back({ hash, compute });
+        }
+
+
+        bool on_any_draw(command_list* cmd_list, const char* kind, uint32_t count, uint32_t instances, bool fullscreen, bool single_quad)
+        {
+            restore_shadow_constants(cmd_list);
+            auto* ctx = context_of(cmd_list);
+
+            if (ctx == nullptr) {
+                return false;
+            }
+
+            cycler_record(ctx->ps_hash, false);
+            const uint64_t skip = state().skip_ps.load(std::memory_order_relaxed);
+
+            if (skip != 0 && ctx->ps_hash == skip) {
+                return true; // developer: pass switched off
+            }
+
+            check_sun_shadows(cmd_list, ctx);
+            bool want = false;
+            float jx = 0, jy = 0;
+            check_resolve_point(cmd_list, ctx, fullscreen, single_quad, want, jx, jy);
+            check_hud_snapshot(cmd_list, ctx, fullscreen);
+            check_hud_mask(cmd_list, ctx);
+
+            if (check_upscale_draw(cmd_list, ctx)) {
                 return true; // replaced by the upscaler
             }
 
-            update_viewport(cmd_list, fullscreen, vertex_count == 4 && instance_count == 1);
+            apply_viewport(cmd_list, ctx, want, jx, jy);
+            trace_draw(ctx, kind, count, instances);
+            return false;
+        }
 
-            if (auto* ctx = cmd_list->get_private_data<context_state>()) {
-                trace_draw(ctx, "draw", vertex_count, instance_count);
+
+        // Tiled lighting dispatches before the resolve get the jittered view ray.
+        bool on_dispatch(command_list* cmd_list, uint32_t, uint32_t, uint32_t)
+        {
+            EDAA_PROFILE(draws);
+            restore_shadow_constants(cmd_list);
+            auto* ctx = context_of(cmd_list);
+
+            if (ctx == nullptr) {
+                return false;
+            }
+
+            cycler_record(ctx->cs_hash, true);
+            const uint64_t skip = state().skip_cs.load(std::memory_order_relaxed);
+
+            if (skip != 0 && ctx->cs_hash == skip) {
+                return true; // developer: pass switched off
+            }
+
+            if (tracing(ctx)) {
+                ctx->trace_lines++;
+                char msg[96];
+                snprintf(msg, sizeof(msg), "EDAA trace: dispatch cs=%016llx", static_cast<unsigned long long>(ctx->cs_hash));
+                reshade::log::message(reshade::log::level::info, msg);
+            }
+
+            const bool lighting = is_tiled_lighting(ctx->cs_hash), occlusion = ctx->cs_hash == occlusion_cs;
+
+            if (!lighting && !occlusion) {
+                return false;
+            }
+
+            float jx, jy;
+            uint32_t w, h;
+            {
+                addon_state& s = state();
+                const std::lock_guard<std::recursive_mutex> lock(s.mutex);
+
+                if (!s.config.fix_sun_shadows || !s.config.jitter_enabled || !s.jitter_allowed || s.resolved_this_frame || s.map_mode ||
+                    s.screenshot_mode) {
+                    return false;
+                }
+
+                jx = s.jitter_x;
+                jy = s.jitter_y;
+                w = s.render_w;
+                h = s.render_h;
+                (lighting ? s.current.lighting_fixes : s.current.occlusion_fixes)++;
+            }
+
+            if (lighting) {
+                fix_lighting_constants(cmd_list, jx, jy, w, h);
+            }
+            else {
+                fix_occlusion_constants(cmd_list, jx, jy, w, h);
             }
 
             return false;
         }
 
 
+        bool on_draw(command_list* cmd_list, uint32_t vertex_count, uint32_t instance_count, uint32_t, uint32_t)
+        {
+            EDAA_PROFILE(draws);
+            return on_any_draw(cmd_list, "draw", vertex_count, instance_count, vertex_count == 3 && instance_count == 1,
+                vertex_count == 4 && instance_count == 1);
+        }
+
+
         bool on_draw_indexed(command_list* cmd_list, uint32_t index_count, uint32_t instance_count, uint32_t, int32_t, uint32_t)
         {
-            check_resolve_point(cmd_list);
-            check_hud_snapshot(cmd_list, false);
-            check_hud_mask(cmd_list);
-
-            if (check_upscale_draw(cmd_list)) {
-                return true;
-            }
-
-            update_viewport(cmd_list, false);
-
-            if (auto* ctx = cmd_list->get_private_data<context_state>()) {
-                trace_draw(ctx, "drawindexed", index_count, instance_count);
-            }
-
-            return false;
+            EDAA_PROFILE(draws);
+            return on_any_draw(cmd_list, "drawindexed", index_count, instance_count, false, false);
         }
     }
 
@@ -807,13 +998,11 @@ namespace edaa
         // (NVIDIA: 8 x ratio^2 phases).
         s.jitter_phases = std::max(1, s.config.jitter_phases);
 
-        s.mip_bias = 0;
         s.upscaling_active = upscaled;
 
         if (upscaled && s.render_w != 0 && s.render_w < s.back_buffer_w) {
             const float ratio = static_cast<float>(s.back_buffer_w) / static_cast<float>(s.render_w);
             s.jitter_phases = static_cast<int>(std::ceil(static_cast<float>(s.jitter_phases) * ratio * ratio));
-            s.mip_bias = s.config.upscale_mip_bias ? -std::log2(ratio) + s.config.mip_bias_extra : 0.0f;
         }
 
         // Next Halton(2,3) sample, centred on the pixel: [-0.5, 0.5).
@@ -821,6 +1010,51 @@ namespace edaa
         const uint32_t index = static_cast<uint32_t>(s.frame % phases) + 1;
         s.jitter_x = (halton(index, 2) - 0.5f) * s.config.jitter_scale;
         s.jitter_y = (halton(index, 3) - 0.5f) * s.config.jitter_scale;
+    }
+
+
+    void cycle_pass(int step)
+    {
+        addon_state& s = state();
+        s.cycler_on = true;
+        cycled_shader skipped = {};
+        int index, count;
+        {
+            const std::lock_guard<std::mutex> lock(cycler_mutex);
+            count = static_cast<int>(cycler_list.size());
+            // Positions -1 (none) to count - 1, wrapping around.
+            cycler_index = step == 0 || count == 0 ? -1 : (cycler_index + 1 + step + 2 * (count + 1)) % (count + 1) - 1;
+            index = cycler_index;
+
+            if (index >= 0) {
+                skipped = cycler_list[index];
+            }
+        }
+
+        s.skip_ps = index >= 0 && !skipped.compute ? skipped.hash : 0;
+        s.skip_cs = index >= 0 && skipped.compute ? skipped.hash : 0;
+
+        char msg[128];
+        snprintf(msg, sizeof(msg), "EDAA cycler: skipping %d / %d: %s %016llx", index + 1, count, skipped.compute ? "cs" : "ps",
+            static_cast<unsigned long long>(skipped.hash));
+        reshade::log::message(reshade::log::level::info, index >= 0 ? msg : "EDAA cycler: nothing skipped");
+    }
+
+
+    uint64_t cycler_status(char* text, size_t size)
+    {
+        const std::lock_guard<std::mutex> lock(cycler_mutex);
+        const int count = static_cast<int>(cycler_list.size());
+
+        if (cycler_index < 0 || cycler_index >= count) {
+            snprintf(text, size, "Nothing skipped (%d shaders recorded)", count);
+            return 0;
+        }
+
+        const cycled_shader& c = cycler_list[cycler_index];
+        snprintf(text, size, "Skipping %d / %d: %s shader %016llx", cycler_index + 1, count, c.compute ? "compute" : "pixel",
+            static_cast<unsigned long long>(c.hash));
+        return c.hash;
     }
 
 
@@ -835,6 +1069,7 @@ namespace edaa
         reshade::register_event<reshade::addon_event::bind_viewports>(on_bind_viewports);
         reshade::register_event<reshade::addon_event::draw>(on_draw);
         reshade::register_event<reshade::addon_event::draw_indexed>(on_draw_indexed);
+        reshade::register_event<reshade::addon_event::dispatch>(on_dispatch);
     }
 
 
@@ -849,5 +1084,6 @@ namespace edaa
         reshade::unregister_event<reshade::addon_event::bind_viewports>(on_bind_viewports);
         reshade::unregister_event<reshade::addon_event::draw>(on_draw);
         reshade::unregister_event<reshade::addon_event::draw_indexed>(on_draw_indexed);
+        reshade::unregister_event<reshade::addon_event::dispatch>(on_dispatch);
     }
 }

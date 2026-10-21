@@ -18,6 +18,7 @@
 // At Present: optional debug view over the back buffer, then auto capture.
 // Rendering uses D3D11 directly, with the game's state saved and restored.
 
+#include "profile.hpp"
 #include "events.hpp"
 #include "state.hpp"
 
@@ -934,6 +935,7 @@ namespace edaa
 
         void on_present(command_queue* queue, swapchain* swapchain, const rect*, const rect*, uint32_t, const rect*)
         {
+            EDAA_PROFILE(present);
             addon_state& s = state();
             const resource back_buffer = swapchain->get_current_back_buffer();
             const resource_desc bb_desc = queue->get_device()->get_resource_desc(back_buffer);
@@ -977,6 +979,16 @@ namespace edaa
                 s.resolve_misses = (resolved && (s.motion_ok || !s.config.taa_enabled)) ? 0 : s.resolve_misses + 1;
                 s.jitter_allowed = s.resolve_misses < 4;
                 s.resolved_this_frame = false;
+#if EDAA_DEVELOPER
+                static_assert(profile::count == sizeof(s.cpu_ms) / sizeof(s.cpu_ms[0]));
+                profile::take(s.cpu_ms);
+                static LARGE_INTEGER last_present = {};
+                LARGE_INTEGER now, frequency;
+                QueryPerformanceCounter(&now);
+                QueryPerformanceFrequency(&frequency);
+                s.frame_ms = last_present.QuadPart != 0 ? static_cast<float>(static_cast<double>(now.QuadPart - last_present.QuadPart) * 1000.0 / frequency.QuadPart) : 0.0f;
+                last_present = now;
+#endif
                 config = s.config;
                 finish_camera_frame(s);
                 analyse_objects(s);
@@ -1048,6 +1060,7 @@ namespace edaa
 
     void run_resolve(command_list* cmd_list)
     {
+        EDAA_PROFILE(passes);
         addon_state& s = state();
         resolve_inputs in;
         {
@@ -1145,6 +1158,7 @@ namespace edaa
 
     void run_hud_mask(command_list* cmd_list)
     {
+        EDAA_PROFILE(passes);
         auto* const device = reinterpret_cast<ID3D11Device*>(cmd_list->get_device()->get_native());
         auto* const ctx = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());
 
@@ -1163,6 +1177,7 @@ namespace edaa
 
     void refresh_hud_snapshot(command_list* cmd_list)
     {
+        EDAA_PROFILE(passes);
         auto* const device = reinterpret_cast<ID3D11Device*>(cmd_list->get_device()->get_native());
         auto* const ctx = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());
 
@@ -1184,6 +1199,7 @@ namespace edaa
 
     bool run_upscale(command_list* cmd_list)
     {
+        EDAA_PROFILE(passes);
         addon_state& s = state();
         uint32_t render_w, render_h, display_w, display_h;
         uint64_t frame, last_image;

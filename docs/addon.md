@@ -146,13 +146,10 @@ Per frame, in the order the game draws:
    (3x3 dilated) into an R8 render-size mask, passed to DLSS as the "bias
    current colour" mask: those pixels use the current frame only. Debug view
    "HUD mask (upscaling)" shows it in cyan.
-   Mip bias ("Texture mip bias", on; `mip_bias.cpp`): the game picks texture
-   mips for the render size, too blurry once upscaled. Each pixel shader
-   sampler bound before the resolve is replaced, right after the game's
-   PSSetSamplers (ReShade `push_descriptors`), by a cached copy with
-   `MipLODBias + log2(render / display)` (-1 at half resolution). Copies are
-   freed with the game's sampler (`destroy_sampler`); no D3D11 call is made
-   while holding the cache lock.
+   No texture mip bias: the game's samplers have none (MipLODBias 0,
+   checked in game), but replacing them with biased copies at every bind
+   gave almost no visible gain (ED textures are mostly magnified at these
+   distances) for a CPU cost on every sampler bind; it was removed.
    XeSS upscaling ("Upscaling" = Intel XeSS): same path, through the D3D12
    bridge of 6c. Preset: the one whose input range
    (`xessGetOptimalInputResolution`, logged once per display size) contains
@@ -288,9 +285,20 @@ defaults" restores the values below. The debug view always starts off.
   ndc.y*cb2[2] + cb2[4]`) times the jittered depth: the ray is the
   unjittered pixel centre, so positions are off by up to half a pixel along
   the depth slope and the shadow test flips on grazing surfaces. Shifting
-  the viewport cannot reach SV_Position; the fix would be a jittered copy of
-  `cb2` for that draw (not done). Medium shadows reduce it; the overlay
-  mentions it when the game renders below the display size.
+  the viewport cannot reach SV_Position, so `shadow_fix.cpp` (option
+  "Lighting follows the jitter", on) gives that draw a copy of its `cb2` range
+  with `cb2[4] += -2 jx / w * cb2[1] + 2 jy / h * cb2[2]`, made on the GPU
+  (`CopySubresourceRegion` into a raw buffer, compute shader
+  `shadow_fix.hlsl`, copy into our constant buffer), and binds the game's
+  buffer again before the next draw unless the game binds another first.
+  Anything unexpected (no buffer, fewer than 37 registers, no D3D11.1
+  context) leaves the draw as it is; a changed shader hash just disables it.
+  The tiled lighting of local lights (compute shaders `932e687ab8739aeb`,
+  `a6542bbe3011f87f`, `b499f7667d34932c`, `083dc2646abe2d51`) has the same
+  flaw with thread ids: `uv = (pixel + 0.5) / size`, ray row i =
+  `dot(cb0[10 + i].xyw, (u, v, 1))`; at their Dispatch, `cb0[10..12].w`
+  gets `- jx / w * x - jy / h * y` the same way (station interiors lit by
+  local lights flickered below 1x).
 * Map detection takes effect one frame after the map appears (one frame
   with jitter when it opens). The galaxy map is not flagged as a map but
   is not affected either: it has no G-buffer scene with a main camera, so

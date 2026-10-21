@@ -157,12 +157,24 @@ def apply_blank_rules(text):
     if trailing_newline:
         lines.pop()
     minimum, exact = blank_rules(lines)
+    # "// clang-format off" ... "// clang-format on": blank lines kept as written.
+    untouched, off = set(), False
+    for i, line in enumerate(lines):
+        if line.strip() == "// clang-format off":
+            off = True
+        if off:
+            untouched.add(i)
+        if line.strip() == "// clang-format on":
+            off = False
     out, blanks = [], 0
     for i, line in enumerate(lines):
         if not line.strip():
             blanks += 1
             continue
-        count = exact.get(i, max(blanks, minimum.get(i, 0))) if out else 0
+        if i in untouched and out:
+            count = blanks
+        else:
+            count = exact.get(i, max(blanks, minimum.get(i, 0))) if out else 0
         out.extend([""] * count)
         out.append(line.rstrip())
         blanks = 0

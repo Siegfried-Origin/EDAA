@@ -21,6 +21,7 @@
 // vehicle pixels (stencil mask), it gives them their true motion, head
 // movements included, instead of none.
 
+#include "profile.hpp"
 #include "events.hpp"
 #include "state.hpp"
 
@@ -54,10 +55,16 @@ namespace edaa
         };
         static_assert(sizeof(record) == 32);
 
-        std::atomic<bool> enabled{ true }; // records are always read (vehicle motion)
+        std::atomic<bool> enabled{ false }; // records read (vehicle motion or analysis)
         std::mutex records_mutex; // protects everything below
         std::unordered_map<uint64_t, void*> mapped; // t33-like buffers waiting for Unmap
         std::vector<record> pending; // records written this frame
+        size_t pending_count = 0; // records in the buffer they come from (the largest one is kept)
+        // Vehicle motion only needs the records around the camera: reading the whole
+        // write-combined buffer every frame cost several ms. All of them for the analysis.
+        bool keep_all = false;
+        float near_center[3] = {};
+        float near_radius = 0;
         uint32_t pending_maps = 0;
         float pending_read_ms = 0;
         std::vector<record> previous; // records of the previous frame
@@ -74,24 +81,44 @@ namespace edaa
 
 
         // The mapping is write-combined memory: plain reads are very slow, SSE4.1
-        // streaming loads are the fast way to read it back.
+        // streaming loads are the fast way to read it back. The position (second
+        // 16 bytes) is read first: far records are skipped unless keep_all (records lock held).
         void copy_records(const uint8_t* src, size_t count, std::vector<record>& out)
         {
-            out.resize(count);
+            out.clear();
+            out.reserve(keep_all ? count : 256);
             const bool aligned = (reinterpret_cast<uintptr_t>(src) & 15) == 0;
+            const float r2 = near_radius * near_radius;
 
             for (size_t i = 0; i < count; ++i) {
                 const uint8_t* p = src + i * record_stride;
+                record r;
+
+                if (aligned) {
+                    const __m128i b = _mm_stream_load_si128(reinterpret_cast<const __m128i*>(p + 16));
+                    _mm_storeu_si128(reinterpret_cast<__m128i*>(&r) + 1, b);
+                }
+                else {
+                    std::memcpy(reinterpret_cast<uint8_t*>(&r) + 16, p + 16, 16);
+                }
+
+                if (!keep_all) {
+                    const float dx = r.pos[0] - near_center[0], dy = r.pos[1] - near_center[1], dz = r.pos[2] - near_center[2];
+
+                    if (!(dx * dx + dy * dy + dz * dz < r2)) {
+                        continue;
+                    }
+                }
 
                 if (aligned) {
                     const __m128i a = _mm_stream_load_si128(reinterpret_cast<const __m128i*>(p));
-                    const __m128i b = _mm_stream_load_si128(reinterpret_cast<const __m128i*>(p + 16));
-                    _mm_storeu_si128(reinterpret_cast<__m128i*>(&out[i]), a);
-                    _mm_storeu_si128(reinterpret_cast<__m128i*>(&out[i]) + 1, b);
+                    _mm_storeu_si128(reinterpret_cast<__m128i*>(&r), a);
                 }
                 else {
-                    std::memcpy(&out[i], p, sizeof(record));
+                    std::memcpy(&r, p, 16);
                 }
+
+                out.push_back(r);
             }
         }
 
@@ -106,6 +133,8 @@ namespace edaa
 
         void on_map_buffer_region(device* device, resource resource, uint64_t offset, uint64_t, map_access access, void** data)
         {
+            EDAA_PROFILE(maps);
+
             if (!is_game_device(device)) {
                 return;
             }
@@ -122,6 +151,8 @@ namespace edaa
 
         void on_unmap_buffer_region(device* device, resource resource)
         {
+            EDAA_PROFILE(maps);
+
             if (!is_game_device(device)) {
                 return;
             }
@@ -145,7 +176,8 @@ namespace edaa
             const std::lock_guard<std::mutex> lock(records_mutex);
             const double start = now_ms();
 
-            if (count >= pending.size()) { // several such buffers: keep the largest
+            if (count >= pending_count) { // several such buffers: keep the largest
+                pending_count = count;
                 copy_records(data, count, pending);
             }
             pending_read_ms += static_cast<float>(now_ms() - start);
@@ -390,12 +422,18 @@ namespace edaa
     void analyse_objects(addon_state& s)
     {
         const bool on = s.config.object_analysis || s.config.debug == static_cast<int>(debug_view::objects);
+        enabled = on || (s.config.vehicle_motion && !s.on_foot);
 
         std::vector<record> cur;
         uint32_t maps;
         float read_ms;
         {
             const std::lock_guard<std::mutex> lock(records_mutex);
+            // Next frame: records within reach of the vehicle around this camera.
+            keep_all = on;
+            std::memcpy(near_center, s.camera.position, sizeof(near_center));
+            near_radius = 25.0f + 4.0f * s.camera_speed;
+            pending_count = 0;
             cur.swap(pending);
             maps = pending_maps;
             read_ms = pending_read_ms;
@@ -508,12 +546,11 @@ namespace edaa
 
     bool vehicle_motion(const camera_frame& cur_cam, const camera_frame& prev_cam, float out[12])
     {
-        std::vector<record> cur, prev;
-        {
-            const std::lock_guard<std::mutex> lock(records_mutex);
-            cur = pending; // this frame's records (written at the start of the frame)
-            prev = previous;
-        }
+        // This frame's records (written at the start of the frame) and the previous
+        // frame's, used in place: render thread, the lock only guards against Unmap.
+        const std::lock_guard<std::mutex> lock(records_mutex);
+        const std::vector<record>& cur = pending;
+        const std::vector<record>& prev = previous;
 
         if (cur.empty() || prev.empty() || !cur_cam.valid || !prev_cam.valid) {
             return false;

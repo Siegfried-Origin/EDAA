@@ -5,6 +5,7 @@
 #include "camera.hpp"
 #include "reshade_includes.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -45,9 +46,7 @@ namespace edaa
         int aa_method = 0; // aa_method
         int upscaling = 0; // upscaler
         bool upscale_hud_mask = true; // upscaling: the cockpit HUD uses the current frame only (no trails)
-        bool upscale_mip_bias = true; // upscaling: scene textures sampled with the display resolution mips (mip_bias.cpp)
         bool upscaler_jitter_flip = false; // developer, not saved: negate the jitter passed to DLSS/XeSS (sign convention check)
-        float mip_bias_extra = 0; // developer: added to the upscaling mip bias (a large negative value makes it obvious)
         bool jitter_enabled = true; // follows taa_enabled unless changed in developer builds
         int jitter_phases = 8; // Halton(2,3) sequence length
         float jitter_scale = 1.0f; // in pixels; > 1 only to make the effect obvious when testing
@@ -72,6 +71,7 @@ namespace edaa
         float mask_distance = 4.0f; // metres: closer pixels are treated as attached to the vehicle (distance mode)
         bool mask_auto_off_on_foot = true; // no vehicle on foot: the ground near the feet must move
         bool vehicle_motion = true; // cockpit/SRV pixels get the vehicle's motion (t33), else none
+        bool fix_sun_shadows = true; // jittered view rays for the sun shadow mask and the tiled lighting (shadow_fix.cpp)
         bool jitter_overlay_draws = true; // also jitter decals, light volumes and glows (else they z-fight and flicker)
         bool object_analysis = false; // developer: read t33 and match instances across frames
         int debug = 0; // debug_view
@@ -110,7 +110,9 @@ namespace edaa
         bool exposure_downsample = false; // R11G11B10 draw at 1/4 render width
         bool hud_shader = false, bloom_shader = false;
         uint32_t gbuffer_binds = 0; // render target bindings that look like a G-buffer (4 targets + depth)
-        uint32_t sampler_binds = 0, biased_binds = 0; // pixel shader sampler binds before the resolve, and those given a mip bias
+        uint32_t shadow_fixes = 0; // sun shadow mask draws given jittered constants
+        uint32_t lighting_fixes = 0; // tiled lighting dispatches given jittered constants
+        uint32_t occlusion_fixes = 0; // ambient occlusion dispatches given jittered constants
 
         uint32_t large_cb_maps = 0; // Map of constant buffers >= camera size
         uint32_t large_cb_updates = 0; // UpdateSubresource of constant buffers >= camera size
@@ -173,7 +175,6 @@ namespace edaa
         uint32_t back_buffer_w = 0, back_buffer_h = 0; // swap chain size, from Present (display size)
         int jitter_phases = 8; // Halton phases in use: the setting x (display / render)^2 when upscaling
         bool upscaling_active = false; // last frame was upscaled by DLSS/XeSS: the method above is not used
-        float mip_bias = 0; // texture LOD bias of the scene draws: log2(render / display) when upscaling, else 0
         uint64_t scene_color = 0; // HDR scene target (G-buffer RT3, R11G11B10), resolved by TAA
         uint64_t depth_candidate = 0; // largest such depth buffer in the frame in progress
         uint64_t color_candidate = 0; // its HDR target
@@ -202,7 +203,8 @@ namespace edaa
         int screenshot_hold = 0; // frames left before leaving screenshot mode
         const char* map_reason = "no";
         bool history_reset = false; // drop the TAA history at the next resolve
-        bool upscale_pending = false; // the resolve ran for upscaling: replace the game's upscale draw
+        // Atomic: the per-draw hooks test it before taking the lock.
+        std::atomic<bool> upscale_pending = false; // the resolve ran for upscaling: replace the game's upscale draw
         bool upscale_attempted = false; // first draw into a display-size target after the resolve seen
         bool hud_snapshot_stale = false; // a fullscreen pass was drawn into the scene after the resolve
         bool hud_mask_done = false; // HUD mask built this frame (at the bloom, or at the upscale without bloom)
@@ -227,8 +229,15 @@ namespace edaa
         object_marker markers[max_markers];
         int marker_count = 0;
 
+        // Developer builds: CPU time of EDAA's handlers last frame (profile.hpp slots) and frame time.
+        float cpu_ms[5] = {};
+        float frame_ms = 0;
+
         bool dump_requested = false; // overlay button: log the next frame's camera updates
-        bool dumping = false; // logging the frame in progress
+        std::atomic<uint64_t> skip_ps = 0; // developer: draws with this pixel shader hash are skipped (0: none)
+        std::atomic<uint64_t> skip_cs = 0; // developer: dispatches with this compute shader hash are skipped (0: none)
+        std::atomic<bool> cycler_on = false; // developer: record the shaders used, for cycle_pass
+        std::atomic<bool> dumping = false; // logging the frame in progress (atomic: tested per draw without the lock)
     };
 
     addon_state& state();
@@ -259,6 +268,11 @@ namespace edaa
     void finish_camera_frame(addon_state& s);
     // Called at Present with the state locked: next jitter offset, swaps counters.
     void advance_frame(addon_state& s);
+    // Developer pass cycler: skips the next (step 1), previous (-1) or no (0)
+    // shader among those used by the game, to find which pass misbehaves.
+    void cycle_pass(int step);
+    // Cycler state for the overlay; returns the skipped hash (0: none).
+    uint64_t cycler_status(char* text, size_t size);
     // Makes the frame's largest G-buffer depth the scene depth (state locked).
     void use_depth_candidate(addon_state& s);
 
@@ -271,6 +285,16 @@ namespace edaa
     // matrix: current camera-relative position -> previous camera-relative
     // position. False when it cannot be found (no vehicle, no agreement).
     bool vehicle_motion(const camera_frame& cur_cam, const camera_frame& prev_cam, float out[12]);
+
+    // Sun shadow mask pass (shadow_fix.cpp): binds a copy of its cb2 with the
+    // view ray shifted by the jitter; false if the draw is left as it is.
+    // restore_shadow_constants() binds the game's buffer again (next draw).
+    bool fix_shadow_constants(reshade::api::command_list* cmd_list, float jitter_x, float jitter_y, uint32_t width, uint32_t height);
+    void restore_shadow_constants(reshade::api::command_list* cmd_list);
+    // Same for the tiled lighting compute shaders (their cb0, at the dispatch).
+    bool fix_lighting_constants(reshade::api::command_list* cmd_list, float jitter_x, float jitter_y, uint32_t width, uint32_t height);
+    // Same for the ambient occlusion compute shader (its cb0).
+    bool fix_occlusion_constants(reshade::api::command_list* cmd_list, float jitter_x, float jitter_y, uint32_t width, uint32_t height);
 
     // Runs the motion vector and TAA passes, right before the game's bloom (state not locked).
     void run_resolve(reshade::api::command_list* cmd_list);

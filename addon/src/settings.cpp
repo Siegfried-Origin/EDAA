@@ -49,11 +49,11 @@ namespace edaa
             EDAA_FIELD(debug_motion_pixels, real),
             EDAA_FIELD(object_analysis, boolean),
             EDAA_FIELD(jitter_overlay_draws, boolean),
+            EDAA_FIELD(fix_sun_shadows, boolean),
             EDAA_FIELD(vehicle_motion, boolean),
             EDAA_FIELD(aa_method, integer),
             EDAA_FIELD(upscaling, integer),
             EDAA_FIELD(upscale_hud_mask, boolean),
-            EDAA_FIELD(upscale_mip_bias, boolean),
         };
 #undef EDAA_FIELD
 

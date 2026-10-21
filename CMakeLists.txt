@@ -40,6 +40,16 @@ add_custom_command(
 	DEPENDS ${TAA_SRC} ${CMAKE_SOURCE_DIR}/addon/shaders/combine.cmake
 	COMMENT "Compiling taa.hlsl"
 )
+set(SHADOW_SRC ${CMAKE_SOURCE_DIR}/addon/shaders/shadow_fix.hlsl)
+set(SHADOW_HEADER ${SHADER_OUT}/shadow_shaders.h)
+add_custom_command(
+	OUTPUT ${SHADOW_HEADER}
+	COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUT}
+	COMMAND ${FXC} /nologo /O3 /T cs_5_0 /E cs_shadow_constants /Vn g_cs_shadow_constants /Fh ${SHADER_OUT}/cs_shadow_constants.h ${SHADOW_SRC}
+	COMMAND ${CMAKE_COMMAND} -DOUT=${SHADOW_HEADER} -DHEADERS=cs_shadow_constants.h -P ${CMAKE_SOURCE_DIR}/addon/shaders/combine.cmake
+	DEPENDS ${SHADOW_SRC} ${CMAKE_SOURCE_DIR}/addon/shaders/combine.cmake
+	COMMENT "Compiling shadow_fix.hlsl"
+)
 
 # Version and build date/time shown in the overlay, refreshed on every build.
 # The version comes from "git describe" unless EDAA_VERSION is set (release workflow).
@@ -58,7 +68,7 @@ add_library(edaa SHARED
 	addon/src/camera_tracker.cpp
 	addon/src/frame_tracking.cpp
 	addon/src/passes.cpp
-	addon/src/mip_bias.cpp
+	addon/src/shadow_fix.cpp
 	addon/src/object_motion.cpp
 	addon/src/overlay.cpp
 	addon/src/capture.cpp
@@ -67,6 +77,7 @@ add_library(edaa SHARED
 	addon/src/xess.cpp
 	${SHADER_HEADER}
 	${TAA_HEADER}
+	${SHADOW_HEADER}
 )
 target_include_directories(edaa SYSTEM PRIVATE ${RESHADE_INCLUDE} ${IMGUI_INCLUDE})
 target_include_directories(edaa PRIVATE ${SHADER_OUT})

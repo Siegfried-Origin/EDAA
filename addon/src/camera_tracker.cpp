@@ -3,6 +3,7 @@
 // at draw time: it is the perspective camera bound while drawing the scene
 // (see frame_tracking.cpp), the one used by the most scene draws in a frame.
 
+#include "profile.hpp"
 #include "events.hpp"
 #include "state.hpp"
 
@@ -122,6 +123,8 @@ namespace edaa
 
         void on_map_buffer_region(device* device, resource resource, uint64_t offset, uint64_t size, map_access access, void** data)
         {
+            EDAA_PROFILE(maps);
+
             if (!is_game_device(device)) {
                 return;
             }
@@ -147,6 +150,8 @@ namespace edaa
 
         void on_unmap_buffer_region(device* device, resource resource)
         {
+            EDAA_PROFILE(maps);
+
             if (!is_game_device(device)) {
                 return;
             }
@@ -170,6 +175,8 @@ namespace edaa
 
         bool on_update_buffer_region(device* device, const void* data, resource dest, uint64_t dest_offset, uint64_t size)
         {
+            EDAA_PROFILE(maps);
+
             if (!is_game_device(device)) {
                 return false;
             }

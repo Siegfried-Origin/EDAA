@@ -39,7 +39,8 @@ namespace edaa
     namespace
     {
         // Hotkeys: Ctrl+Shift+T toggles TAA (and jitter, saved). Developer builds
-        // also: Ctrl+Shift+J jitter alone, Ctrl+Shift+M debug view, Ctrl+Shift+C capture.
+        // also: Ctrl+Shift+J jitter alone, Ctrl+Shift+M debug view, Ctrl+Shift+C capture,
+        // Ctrl+Shift+Page Down / Page Up / Home pass cycler.
         void on_reshade_present(reshade::api::effect_runtime* runtime)
         {
             if (!runtime->is_key_down(VK_CONTROL) || !runtime->is_key_down(VK_SHIFT)) {
@@ -67,6 +68,19 @@ namespace edaa
             if (runtime->is_key_pressed('C')) {
                 const std::lock_guard<std::recursive_mutex> lock(s.mutex);
                 s.capture_requested = true;
+            }
+
+            // Pass cycler: Page Down / Page Up skip the next / previous shader, Home none.
+            if (runtime->is_key_pressed(VK_NEXT)) {
+                cycle_pass(1);
+            }
+
+            if (runtime->is_key_pressed(VK_PRIOR)) {
+                cycle_pass(-1);
+            }
+
+            if (runtime->is_key_pressed(VK_HOME)) {
+                cycle_pass(0);
             }
 
             if (runtime->is_key_pressed('M')) {
@@ -97,7 +111,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
             edaa::register_frame_events();
             edaa::register_object_events();
             edaa::register_pass_events();
-            edaa::register_mip_bias_events();
+            edaa::register_shadow_fix_events();
             reshade::register_event<reshade::addon_event::reshade_present>(edaa::on_reshade_present);
             reshade::register_overlay("EDAA", edaa::draw_overlay);
             {
@@ -109,7 +123,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
         case DLL_PROCESS_DETACH:
             reshade::unregister_overlay("EDAA", edaa::draw_overlay);
             reshade::unregister_event<reshade::addon_event::reshade_present>(edaa::on_reshade_present);
-            edaa::unregister_mip_bias_events();
+            edaa::unregister_shadow_fix_events();
             edaa::unregister_pass_events();
             edaa::unregister_object_events();
             edaa::unregister_frame_events();

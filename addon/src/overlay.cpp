@@ -10,6 +10,7 @@
 #include "state.hpp"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace edaa
@@ -91,10 +92,9 @@ namespace edaa
 
             const bool use_xess = shown->backend == upscaler::xess;
             edit(ImGui::Checkbox("HUD mask (cockpit HUD from the current frame: no trails)", &s.config.upscale_hud_mask));
-            edit(ImGui::Checkbox("Texture mip bias (display resolution texture detail)", &s.config.upscale_mip_bias));
             ImGui::Text("Upscaling: %s", s.upscale_status);
             ImGui::Text("%s: %s", use_xess ? "XeSS" : "DLSS", use_xess ? xess::status().c_str() : dlss::status().c_str());
-            ImGui::Text("Jitter: %d phases, texture LOD bias %+.2f", s.jitter_phases, s.mip_bias);
+            ImGui::Text("Jitter: %d phases", s.jitter_phases);
 
             const upscale_info info = use_xess ? xess::info() : dlss::info();
 
@@ -233,6 +233,7 @@ namespace edaa
             edit(ImGui::Checkbox("Detect maps also by missing sun shadows", &s.config.map_detect_no_shadows));
             edit(ImGui::Combo("Vehicle mask", &s.config.mask_source, "Game stencil (player's vehicle)\0Distance to camera\0"));
             edit(ImGui::Checkbox("Vehicle motion (cockpit follows head movements)", &s.config.vehicle_motion));
+            edit(ImGui::Checkbox("Lighting follows the jitter (stable shadow edges)", &s.config.fix_sun_shadows));
 
             if (s.config.mask_source == 1) {
                 edit(ImGui::SliderFloat("Vehicle mask distance (m)", &s.config.mask_distance, 0.0f, 20.0f, "%.1f"));
@@ -291,13 +292,21 @@ namespace edaa
         void draw_developer(addon_state& s, change_tracker& edit)
         {
             ImGui::Text("Resolve point: %s", s.resolve_point);
+            // Draw hooks include the passes they run; Present is counted on the next frame.
+            ImGui::Text("Frame %.2f ms. EDAA CPU: draws %.2f (passes %.2f), binds %.2f, maps %.2f, present %.2f ms", s.frame_ms,
+                s.cpu_ms[0], s.cpu_ms[3], s.cpu_ms[1], s.cpu_ms[2], s.cpu_ms[4]);
             ImGui::Text("Last frame: %u G-buffer binds, %u draws into the HDR target, exposure downsample %s, HUD shader %s, bloom shader %s",
                 s.last.gbuffer_binds, s.last.hdr_draws, s.last.exposure_downsample ? "yes" : "no",
                 s.last.hud_shader ? "yes" : "no", s.last.bloom_shader ? "yes" : "no");
             ImGui::Text("Map on screen: %s", s.map_reason);
             ImGui::Text("On foot (first-person body drawn): %s", s.on_foot ? "yes" : "no");
-            ImGui::Text("Vehicle motion: %s", !s.config.vehicle_motion ? "off" : s.vehicle_known ? "found"
-                                                                                                 : "not found (vehicle pixels get no motion)");
+            const char* vehicle = !s.config.vehicle_motion ? "off"
+                : s.on_foot                                ? "not used on foot"
+                : s.vehicle_known                          ? "found"
+                                                           : "not found (vehicle pixels get no motion)";
+            ImGui::Text("Vehicle motion: %s", vehicle);
+            ImGui::Text("Jittered view rays last frame: %u sun shadow mask draws, %u tiled lighting, %u occlusion dispatches",
+                s.last.shadow_fixes, s.last.lighting_fixes, s.last.occlusion_fixes);
 
             ImGui::Separator();
             ImGui::TextUnformatted("Jitter (Ctrl+Shift+J)");
@@ -306,9 +315,46 @@ namespace edaa
             edit(ImGui::SliderFloat("Amplitude (pixels)", &s.config.jitter_scale, 1.0f, 16.0f, "%.1f"));
             edit(ImGui::Checkbox("Jitter decals, light volumes and glows (off: they z-fight and flicker)", &s.config.jitter_overlay_draws));
             edit(ImGui::Checkbox("DLSS/XeSS: negate the jitter offset (sign convention check)", &s.config.upscaler_jitter_flip));
-            edit(ImGui::SliderFloat("Upscaling: extra mip bias", &s.config.mip_bias_extra, -4.0f, 2.0f, "%+.1f"));
-            ImGui::Text("Last frame: %u pixel shader sampler binds before the resolve, %u given a mip bias", s.last.sampler_binds, s.last.biased_binds);
             ImGui::Text("Current offset: %+.3f, %+.3f px", s.jitter_x, s.jitter_y);
+
+            // Switches one pass off to find what flickers (hashes as in the trace).
+            static char skip_text[17] = "";
+
+            if (ImGui::InputText("Skip draws with pixel shader (hex hash)", skip_text, sizeof(skip_text), ImGuiInputTextFlags_CharsHexadecimal)) {
+                s.skip_ps = std::strtoull(skip_text, nullptr, 16);
+            }
+
+            // Pass cycler: switches the game's shaders off one at a time.
+            ImGui::TextUnformatted("Pass cycler (Ctrl+Shift+Page Down / Page Up, Home: none)");
+
+            if (ImGui::Button("Previous")) {
+                cycle_pass(-1);
+            }
+
+            ImGui::SameLine();
+
+            if (ImGui::Button("Next")) {
+                cycle_pass(1);
+            }
+
+            ImGui::SameLine();
+
+            if (ImGui::Button("None")) {
+                cycle_pass(0);
+            }
+
+            char cycler_text[96];
+            const uint64_t skipped = cycler_status(cycler_text, sizeof(cycler_text));
+            ImGui::SameLine();
+
+            if (ImGui::Button("Copy hash") && skipped != 0) {
+                char hash[17];
+                snprintf(hash, sizeof(hash), "%016llx", static_cast<unsigned long long>(skipped));
+                ImGui::SetClipboardText(hash);
+            }
+
+            ImGui::TextUnformatted(cycler_text);
+
             ImGui::Text("Last frame: %u of %u scene draws jittered", s.last.jittered_draws, s.last.scene_draws);
 
             if (s.config.taa_enabled && !s.config.jitter_enabled) {
