@@ -9,7 +9,11 @@
 
 extern "C" __declspec(dllexport) const char* NAME = "EDAA";
 extern "C" __declspec(dllexport) const char* DESCRIPTION =
-    "Temporal anti-aliasing groundwork for Elite Dangerous: camera tracking, sub-pixel jitter, motion vectors.";
+    "Temporal anti-aliasing and upscaling for Elite Dangerous Odyssey: EDAA TAA, NVIDIA DLAA/DLSS, Intel XeSS.";
+// Shown by ReShade in the Add-ons tab.
+extern "C" __declspec(dllexport) const char* AUTHOR = "Siegfried-Origin";
+extern "C" __declspec(dllexport) const char* WEBSITE = "https://siegfried-origin.github.io/EDAA/";
+extern "C" __declspec(dllexport) const char* ISSUES = "https://github.com/Siegfried-Origin/EDAA/issues";
 
 namespace edaa
 {

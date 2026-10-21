@@ -58,7 +58,7 @@ add_custom_target(edaa_build_stamp
 	COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUT}
 	COMMAND ${CMAKE_COMMAND} -DOUT=${SHADER_OUT}/build_stamp.h -DSOURCE_DIR=${CMAKE_SOURCE_DIR} "-DVERSION=${EDAA_VERSION}"
 		-P ${CMAKE_SOURCE_DIR}/addon/build_stamp.cmake
-	BYPRODUCTS ${SHADER_OUT}/build_stamp.h
+	BYPRODUCTS ${SHADER_OUT}/build_stamp.h ${SHADER_OUT}/version.h
 	COMMENT "Updating build stamp"
 )
 
@@ -76,6 +76,7 @@ add_library(edaa SHARED
 	addon/src/settings.cpp
 	addon/src/dlss.cpp
 	addon/src/xess.cpp
+	addon/edaa.rc
 	${SHADER_HEADER}
 	${TAA_HEADER}
 	${SHADOW_HEADER}
