@@ -31,10 +31,11 @@ def main(c):
     actions = {a.eventId: a for a in rdlib.iter_actions(c.GetRootActions())}
     sd = c.GetStructuredFile()
     textures = c.GetTextures()
-    # Render size = size of the largest R11G11B10 target below the largest depth (the display size).
+    # Render size = the largest depth size that also has an R11G11B10 (HDR scene) target.
     depths = [t for t in textures if "D32S8" in t.format.Name() or "R32G8X24" in t.format.Name()]
-    sizes = sorted({(t.width, t.height) for t in depths}, key=lambda s: s[0] * s[1])
-    render = sizes[-2] if len(sizes) > 1 else sizes[-1]
+    hdr = {(t.width, t.height) for t in textures if "R11G11B10" in t.format.Name()}
+    sizes = sorted({(t.width, t.height) for t in depths if (t.width, t.height) in hdr}, key=lambda s: s[0] * s[1])
+    render = sizes[-1]
     targets = [t for t in textures if (t.width, t.height) == render and
                (t in depths or "R11G11B10" in t.format.Name() or "R10G10B10A2" in t.format.Name())]
     last = max(actions)

@@ -722,7 +722,7 @@ namespace edaa
             ctx->OMSetRenderTargets(1, taau_target, nullptr);
             ID3D11Buffer* const cb[] = { gpu.taa_cb.Get() };
             ctx->PSSetConstantBuffers(0, 1, cb);
-            bind_srvs(ctx, { gpu.upscale_input.srv.Get(), prev.srv.Get(), gpu.motion.srv.Get(), gpu.depth.srv.Get(), upscale_in.hud_mask ? gpu.hud_mask.srv.Get() : nullptr });
+            bind_srvs(ctx, { gpu.upscale_input.srv.Get(), prev.srv.Get(), gpu.motion.srv.Get(), gpu.depth.srv.Get(), upscale_in.hud_mask ? gpu.hud_mask.srv.Get() : nullptr, gpu.mask.srv.Get() });
             ctx->PSSetShader(gpu.ps_taau.Get(), nullptr, 0);
             ctx->Draw(3, 0);
 

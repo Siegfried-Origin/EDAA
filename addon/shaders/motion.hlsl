@@ -60,7 +60,27 @@ motion_output ps_motion(float4 pos : SV_Position)
     // in the stencil (bit 0x80: cockpit, SRV; not set on foot); the distance
     // rule (closer than params.w metres) is the fallback.
     if (debug.z < 0.5) {
-        o.mask = (scene_stencil.Load(int3(pos.xy, 0)).g & uint(debug.w)) != 0 ? 1 : 0;
+        const uint bits = uint(debug.w);
+        o.mask = (scene_stencil.Load(int3(pos.xy, 0)).g & bits) != 0 ? 1 : 0;
+
+        // Some cockpit edges (a rim of 1-2 pixels along the canopy struts) are
+        // drawn without the stencil bit. A pixel next to a vehicle pixel, at
+        // about its distance (not the world behind), belongs to the vehicle too.
+        if (o.mask == 0 && depth > 0) {
+            const float view_z = params.z / depth;
+            const int2 offsets[8] = { int2(1, 0), int2(-1, 0), int2(0, 1), int2(0, -1), int2(2, 0), int2(-2, 0), int2(0, 2), int2(0, -2) };
+
+            // clang-format off
+            [unroll] for (int i = 0; i < 8; ++i) {
+                const int3 q = int3(clamp(int2(pos.xy) + offsets[i], int2(0, 0), int2(render_size.xy) - 1), 0);
+                const float d = scene_depth.Load(q);
+
+                if ((scene_stencil.Load(q).g & bits) != 0 && d > 0 && view_z < params.z / d * 1.5 + 0.5) {
+                    o.mask = 1;
+                }
+            }
+            // clang-format on
+        }
     }
     else {
         o.mask = (depth > 0 && params.z / depth < params.w) ? 1 : 0;

@@ -308,6 +308,12 @@ namespace edaa
             edit(ImGui::SliderFloat("Amplitude (pixels)", &s.config.jitter_scale, 1.0f, 16.0f, "%.1f"));
             edit(ImGui::Checkbox("Jitter decals, light volumes and glows (off: they z-fight and flicker)", &s.config.jitter_overlay_draws));
             edit(ImGui::Checkbox("DLSS/XeSS: negate the jitter offset (sign convention check)", &s.config.upscaler_jitter_flip));
+            bool flush = s.xess_flush;
+
+            if (ImGui::Checkbox("XeSS: flush D3D11 before XeSS (frame pacing test)", &flush)) {
+                s.xess_flush = flush;
+            }
+
             ImGui::Text("Current offset: %+.3f, %+.3f px", s.jitter_x, s.jitter_y);
 
             // Switches one pass off to find what flickers (hashes as in the trace).

@@ -20,6 +20,7 @@ Texture2D<float4> history_tex : register(t1);
 Texture2D<float2> motion_tex : register(t2);
 Texture2D<float> scene_depth : register(t3);
 Texture2D<float> hud_mask_tex : register(t4); // upscaling: 1 where the cockpit HUD was drawn this frame
+Texture2D<float> vehicle_mask_tex : register(t5); // 1 on the player's vehicle (motion.hlsl)
 SamplerState linear_clamp : register(s0);
 
 
@@ -139,8 +140,10 @@ float4 ps_taa(float4 pos : SV_Position) : SV_Target
     }
     // clang-format on
 
+    // History follows the foreground; "moving" also takes this pixel's own
+    // motion (world next to the cockpit, see ps_taau).
     const float2 motion = motion_tex.Load(int3(clamp(best, int2(0, 0), int2(render_size.xy) - 1), 0));
-    const float motion_px = length(motion * render_size.xy);
+    const float motion_px = max(length(motion * render_size.xy), length(motion_tex.Load(int3(p, 0)) * render_size.xy));
 
     // Variance clip box. Still pixels get a larger box (static clip gamma): thin
     // bright details that come and go with the jitter are then not clipped
@@ -262,14 +265,21 @@ float4 ps_taau(float4 pos : SV_Position) : SV_Target
     const float3 current = filtered / max(filter_weight, 1e-5);
     const float3 current_sharp = sharp_weight > 1e-4 ? sharp / sharp_weight : current;
     const float confidence = saturate(sharp_weight);
+    // History follows the foreground (closest depth), but "moving" also looks at
+    // this pixel's own motion: world pixels next to the cockpit take its zero
+    // motion and would otherwise get the loose still-pixel clip (ghosting).
     const float2 motion = motion_tex.Load(int3(best, 0));
-    const float motion_px = length(motion * display_size.xy); // output pixels
+    const float2 own_motion = motion_tex.Load(int3(clamp(center, int2(0, 0), last), 0));
+    const float motion_px = max(length(motion * display_size.xy), length(own_motion * display_size.xy)); // output pixels
 
     // Variance clip from the input samples. The 3x3 min/max changes with every
     // jitter phase: it limits moving pixels only (still ones would flicker).
     const float3 mean = m1 / 9;
     const float3 sigma = sqrt(max(m2 / 9 - mean * mean, 0));
-    const float moving = saturate(motion_px / 2);
+    // The cockpit moves with the head and the ship's vibrations, which its
+    // motion vectors follow only approximately: always the tight clip there.
+    const bool vehicle = vehicle_mask_tex.Load(int3(clamp(center, int2(0, 0), last), 0)) > 0.5;
+    const float moving = vehicle ? 1 : saturate(motion_px / 2);
     const float gamma = lerp(flicker.z, blend.w, moving);
     const float3 clip_min = lerp(mean - gamma * sigma, max(box_min, mean - gamma * sigma), moving);
     const float3 clip_max = lerp(mean + gamma * sigma, min(box_max, mean + gamma * sigma), moving);
@@ -282,6 +292,7 @@ float4 ps_taau(float4 pos : SV_Position) : SV_Target
     }
 
     history_weight = lerp(history_weight, min(history_weight, blend.y), saturate(motion_px / 32));
+
     float3 history = current;
 
     if (history_weight > 0) {

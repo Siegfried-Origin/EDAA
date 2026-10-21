@@ -228,8 +228,10 @@ namespace edaa::xess
                 return false;
             }
 
+            // High priority: the game's D3D11 work waits for XeSS on the GPU.
             D3D12_COMMAND_QUEUE_DESC queue = {};
             queue.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+            queue.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
 
             if (failed("D3D12 queue creation failed", b.device12->CreateCommandQueue(&queue, IID_PPV_ARGS(&b.queue)))) {
                 return false;
@@ -446,7 +448,11 @@ namespace edaa::xess
 
             const uint64_t inputs_ready = ++b.fence_value;
             ctx4->Signal(b.fence11.Get(), inputs_ready);
-            ctx->Flush();
+
+            // Submits the copies now so XeSS can start; off: D3D11 submits at its own pace.
+            if (state().xess_flush.load(std::memory_order_relaxed)) {
+                ctx->Flush();
+            }
 
             // 2. D3D12: XeSS on our queue, after the D3D11 copies.
             const uint32_t slot = b.frame++ % allocator_count;

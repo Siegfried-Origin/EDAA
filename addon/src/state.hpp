@@ -243,6 +243,7 @@ namespace edaa
         bool dump_requested = false; // overlay button: log the next frame's camera updates
         std::atomic<uint64_t> skip_ps = 0; // developer: draws with this pixel shader hash are skipped (0: none)
         std::atomic<uint64_t> skip_cs = 0; // developer: dispatches with this compute shader hash are skipped (0: none)
+        std::atomic<bool> xess_flush = false; // developer, not saved: flush D3D11 before XeSS runs (off: smoother frame pacing in tests)
         std::atomic<bool> cycler_on = false; // developer: record the shaders used, for cycle_pass
         // Mip bias (mip_bias.cpp), read at every sampler bind without the lock:
         // on from the frame start to the resolve while upscaling.

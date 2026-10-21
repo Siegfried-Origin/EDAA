@@ -491,55 +491,121 @@ namespace edaa
         }
 
 
-        // Rigid motion of one record from the previous frame: x_cur = R x_prev + t.
-        struct rigid
+        // Point of a record's model, 'd' metres along its axes, camera-relative.
+        std::array<double, 3> model_point(const record& r, const double rot[9], const double d[3], const float camera[3])
         {
-            double r[9], t[3];
-        };
-
-
-        rigid motion_of(const record& prev, const record& cur)
-        {
-            double rp[9], rc[9];
-            rotation_matrix(prev.rotation, rp);
-            rotation_matrix(cur.rotation, rc);
-            rigid m;
+            std::array<double, 3> out;
 
             for (int i = 0; i < 3; ++i) {
-                for (int j = 0; j < 3; ++j) {
-                    m.r[i * 3 + j] = rc[i * 3] * rp[j * 3] + rc[i * 3 + 1] * rp[j * 3 + 1] + rc[i * 3 + 2] * rp[j * 3 + 2]; // Rc Rp^T
-                }
+                out[i] = r.pos[i] - static_cast<double>(camera[i]) + rot[i * 3] * d[0] + rot[i * 3 + 1] * d[1] + rot[i * 3 + 2] * d[2];
             }
 
-            for (int i = 0; i < 3; ++i) {
-                m.t[i] = cur.pos[i] - (m.r[i * 3] * prev.pos[0] + m.r[i * 3 + 1] * prev.pos[1] + m.r[i * 3 + 2] * prev.pos[2]);
-            }
-
-            return m;
+            return out;
         }
 
 
-        // Same motion: points around 'at' (up to 10 m away) land within 5 mm.
-        bool similar(const rigid& a, const rigid& b, const record& at)
+        // Largest eigenvalue's eigenvector of a symmetric 4x4 matrix (cyclic Jacobi).
+        void largest_eigenvector(double a[4][4], double out[4])
         {
-            for (int i = 0; i < 3; ++i) {
-                double pa = a.t[i], pb = b.t[i];
+            double v[4][4] = { { 1, 0, 0, 0 }, { 0, 1, 0, 0 }, { 0, 0, 1, 0 }, { 0, 0, 0, 1 } };
 
-                for (int j = 0; j < 3; ++j) {
-                    pa += a.r[i * 3 + j] * at.pos[j];
-                    pb += b.r[i * 3 + j] * at.pos[j];
+            for (int sweep = 0; sweep < 50; ++sweep) {
+                double off = 0;
 
-                    if (std::fabs(a.r[i * 3 + j] - b.r[i * 3 + j]) * 10.0 > 0.005) {
-                        return false;
+                for (int p = 0; p < 4; ++p) {
+                    for (int q = p + 1; q < 4; ++q) {
+                        off += a[p][q] * a[p][q];
                     }
                 }
 
-                if (std::fabs(pa - pb) > 0.005) {
-                    return false;
+                if (off < 1e-30) {
+                    break;
+                }
+
+                for (int p = 0; p < 4; ++p) {
+                    for (int q = p + 1; q < 4; ++q) {
+                        if (std::fabs(a[p][q]) < 1e-300) {
+                            continue;
+                        }
+
+                        const double theta = (a[q][q] - a[p][p]) / (2 * a[p][q]);
+                        const double tn = (theta >= 0 ? 1.0 : -1.0) / (std::fabs(theta) + std::sqrt(theta * theta + 1));
+                        const double c = 1 / std::sqrt(tn * tn + 1), s = tn * c;
+
+                        for (int k = 0; k < 4; ++k) {
+                            const double akp = a[k][p], akq = a[k][q];
+                            a[k][p] = c * akp - s * akq;
+                            a[k][q] = s * akp + c * akq;
+                        }
+
+                        for (int k = 0; k < 4; ++k) {
+                            const double apk = a[p][k], aqk = a[q][k];
+                            a[p][k] = c * apk - s * aqk;
+                            a[q][k] = s * apk + c * aqk;
+                        }
+
+                        for (int k = 0; k < 4; ++k) {
+                            const double vkp = v[k][p], vkq = v[k][q];
+                            v[k][p] = c * vkp - s * vkq;
+                            v[k][q] = s * vkp + c * vkq;
+                        }
+                    }
                 }
             }
 
-            return true;
+            int best = 0;
+
+            for (int i = 1; i < 4; ++i) {
+                best = a[i][i] > a[best][best] ? i : best;
+            }
+
+            for (int i = 0; i < 4; ++i) {
+                out[i] = v[i][best];
+            }
+        }
+
+
+        // Least-squares rigid motion b = R a + t over point pairs (Horn 1987,
+        // closed form with quaternions). R row-major.
+        void fit_rigid(const std::vector<std::array<double, 3>>& a, const std::vector<std::array<double, 3>>& b, double r[9], double t[3])
+        {
+            double ca[3] = {}, cb[3] = {};
+            const double n = static_cast<double>(a.size());
+
+            for (size_t i = 0; i < a.size(); ++i) {
+                for (int k = 0; k < 3; ++k) {
+                    ca[k] += a[i][k] / n;
+                    cb[k] += b[i][k] / n;
+                }
+            }
+
+            double s[3][3] = {}; // sum of (a - ca)(b - cb)^T
+
+            for (size_t i = 0; i < a.size(); ++i) {
+                for (int j = 0; j < 3; ++j) {
+                    for (int k = 0; k < 3; ++k) {
+                        s[j][k] += (a[i][j] - ca[j]) * (b[i][k] - cb[k]);
+                    }
+                }
+            }
+
+            double m[4][4] = {
+                { s[0][0] + s[1][1] + s[2][2], s[1][2] - s[2][1], s[2][0] - s[0][2], s[0][1] - s[1][0] },
+                { s[1][2] - s[2][1], s[0][0] - s[1][1] - s[2][2], s[0][1] + s[1][0], s[2][0] + s[0][2] },
+                { s[2][0] - s[0][2], s[0][1] + s[1][0], -s[0][0] + s[1][1] - s[2][2], s[1][2] + s[2][1] },
+                { s[0][1] - s[1][0], s[2][0] + s[0][2], s[1][2] + s[2][1], -s[0][0] - s[1][1] + s[2][2] },
+            };
+            double q[4]; // w, x, y, z
+            largest_eigenvector(m, q);
+            const double w = q[0], x = q[1], y = q[2], z = q[3];
+            const double rot[9] = { w * w + x * x - y * y - z * z, 2 * (x * y - w * z), 2 * (x * z + w * y),
+                2 * (x * y + w * z), w * w - x * x + y * y - z * z, 2 * (y * z - w * x),
+                2 * (x * z - w * y), 2 * (y * z + w * x), w * w - x * x - y * y + z * z };
+            std::memcpy(r, rot, sizeof(rot));
+
+            for (int i = 0; i < 3; ++i) {
+                t[i] = cb[i] - (r[i * 3] * ca[0] + r[i * 3 + 1] * ca[1] + r[i * 3 + 2] * ca[2]);
+            }
         }
     }
 
@@ -572,10 +638,17 @@ namespace edaa
             }
         }
 
-        std::vector<std::pair<rigid, const record*>> motions;
+        // Each matched record gives 7 point pairs: its origin and points 0.5 m
+        // along its axes (so its rotation counts), camera-relative, current ->
+        // previous. The vehicle's parts do not move exactly alike (vibrations
+        // shake them by a few tenths of a degree each): the motion closest to
+        // all of them (least squares) is used, after dropping the outliers
+        // (animated parts, wrong matches).
+        constexpr double offsets[7][3] = { { 0, 0, 0 }, { 0.5, 0, 0 }, { -0.5, 0, 0 }, { 0, 0.5, 0 }, { 0, -0.5, 0 }, { 0, 0, 0.5 }, { 0, 0, -0.5 } };
+        std::vector<std::array<double, 3>> from, to;
 
         for (const record& c : cur) {
-            if (!valid(c) || distance(c.pos, cur_cam.position) >= 20.0f) {
+            if (!valid(c) || distance(c.pos, cur_cam.position) >= 20.0f || from.size() >= 256 * 7) {
                 continue;
             }
 
@@ -600,45 +673,78 @@ namespace edaa
                 }
             }
 
-            if (best != nullptr && motions.size() < 256) {
-                motions.emplace_back(motion_of(*best, c), &c);
+            if (best == nullptr) {
+                continue;
+            }
+
+            double rc[9], rp[9];
+            rotation_matrix(c.rotation, rc);
+            rotation_matrix(best->rotation, rp);
+
+            for (const auto& d : offsets) {
+                from.push_back(model_point(c, rc, d, cur_cam.position));
+                to.push_back(model_point(*best, rp, d, prev_cam.position));
             }
         }
 
-        // The motion shared by the most records (animated parts and mismatches vote alone).
-        int best = -1, best_votes = 0;
+        const size_t matched = from.size() / 7;
 
-        for (size_t i = 0; i < motions.size(); ++i) {
-            int votes = 0;
-
-            for (size_t j = 0; j < motions.size(); ++j) {
-                votes += similar(motions[i].first, motions[j].first, *motions[j].second) ? 1 : 0;
-            }
-
-            if (votes > best_votes) {
-                best_votes = votes;
-                best = static_cast<int>(i);
-            }
-        }
-
-        if (best < 0 || best_votes < 3 || best_votes * 2 < static_cast<int>(motions.size())) {
+        if (matched < 3) {
             return false;
         }
 
-        // Current camera-relative position -> previous camera-relative position:
-        // p_prev = R^T (p + cam - t) - cam_prev.
-        const rigid& m = motions[best].first;
+        double r[9], t[3];
+        fit_rigid(from, to, r, t);
 
-        for (int i = 0; i < 3; ++i) {
-            double offset = -static_cast<double>(prev_cam.position[i]);
+        // Outliers: records whose points miss the fit by more than 3 times the
+        // median miss (at least 2 mm). Twice, then the fit on what remains.
+        for (int pass = 0; pass < 2; ++pass) {
+            std::vector<double> miss(from.size() / 7, 0.0);
 
-            for (int j = 0; j < 3; ++j) {
-                const double rt = m.r[j * 3 + i]; // R^T
-                out[i * 4 + j] = static_cast<float>(rt);
-                offset += rt * (static_cast<double>(cur_cam.position[j]) - m.t[j]);
+            for (size_t i = 0; i < from.size(); ++i) {
+                double e2 = 0;
+
+                for (int k = 0; k < 3; ++k) {
+                    const double e = r[k * 3] * from[i][0] + r[k * 3 + 1] * from[i][1] + r[k * 3 + 2] * from[i][2] + t[k] - to[i][k];
+                    e2 += e * e;
+                }
+
+                miss[i / 7] = std::max(miss[i / 7], std::sqrt(e2));
             }
 
-            out[i * 4 + 3] = static_cast<float>(offset);
+            std::vector<double> sorted = miss;
+            std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
+            const double limit = std::max(0.002, 3 * sorted[sorted.size() / 2]);
+            std::vector<std::array<double, 3>> kept_from, kept_to;
+
+            for (size_t i = 0; i < from.size(); ++i) {
+                if (miss[i / 7] <= limit) {
+                    kept_from.push_back(from[i]);
+                    kept_to.push_back(to[i]);
+                }
+            }
+
+            if (kept_from.size() == from.size()) {
+                break;
+            }
+
+            // Most records must agree: else this is not one vehicle.
+            if (kept_from.size() / 7 < 3 || kept_from.size() * 2 < from.size()) {
+                return false;
+            }
+
+            from.swap(kept_from);
+            to.swap(kept_to);
+            fit_rigid(from, to, r, t);
+        }
+
+        // Current camera-relative position -> previous camera-relative position.
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                out[i * 4 + j] = static_cast<float>(r[i * 3 + j]);
+            }
+
+            out[i * 4 + 3] = static_cast<float>(t[i]);
         }
 
         return true;

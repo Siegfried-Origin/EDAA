@@ -52,9 +52,14 @@ Per frame, in the order the game draws:
       pixels get the vehicle's own motion (option "Vehicle motion", on):
       `vehicle_motion` (`object_motion.cpp`) matches the `t33` records within
       20 m of the camera with the previous frame's (same place once the
-      camera motion is removed, same kind and scale), takes the rigid motion
-      most of them share (vote; animated parts disagree) and passes it as a
-      3x4 matrix, current to previous camera-relative position. Head
+      camera motion is removed, same kind and scale) and fits the rigid
+      motion closest to all of them: least squares (Horn's closed form) on 7
+      points per record (origin and 0.5 m along its axes), outliers (animated
+      parts, wrong matches: more than 3x the median miss, 2 mm at least)
+      dropped twice. The parts do not move exactly alike when the ship
+      vibrates (a few tenths of a degree each): an exact-agreement vote failed
+      there (vibration pair: no motion, 2.9 px error at 1x; the fit: 0.7 px).
+      Passed as a 3x4 matrix, current to previous camera-relative position. Head
       movements (free look, G-forces, shake) then move the cockpit on screen
       as they should. When no motion is found, those pixels get none (they
       mostly move with the camera). Checked offline on the cockpit_turn pair:
