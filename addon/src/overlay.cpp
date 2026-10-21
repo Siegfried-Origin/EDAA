@@ -117,7 +117,7 @@ namespace edaa
             };
             const choice choices[] = {
                 { aa_method::taa, "EDAA TAA", 1 },
-                { aa_method::dlaa, "NVIDIA DLSS (DLAA at native resolution)", dlss::availability() },
+                { aa_method::dlaa, "NVIDIA DLSS", dlss::availability() },
                 { aa_method::xess, "Intel XeSS", xess::availability() },
             };
             // A saved method that cannot run is replaced by the TAA (passes.cpp).

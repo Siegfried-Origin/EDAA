@@ -1247,7 +1247,7 @@ namespace edaa
             s.motion_status = "ok (EDAA TAA: the selected method is unavailable, see below)";
         }
         else {
-            s.motion_status = in.camera_cut ? "ok (history reset: camera cut)" : "ok";
+            s.motion_status = in.camera_cut ? "ok (EDAA TAA, history reset: camera cut)" : "ok (EDAA TAA)";
         }
     }
 
