@@ -222,7 +222,10 @@ float4 ps_taau(float4 pos : SV_Position) : SV_Target
     const float2 in_pos = uv * render_size.xy;
     const int2 center = int2(floor(in_pos));
     const int2 last = int2(render_size.xy) - 1;
-    const float2 jitter_px = jitter.xy * render_size.xy;
+    // The cockpit HUD is drawn after the resolve point, without the jitter:
+    // its pixels are filtered around their own centres (else the HUD shakes).
+    const bool hud = hud_mask_tex.Load(int3(clamp(center, int2(0, 0), last), 0)) > 0.5;
+    const float2 jitter_px = hud ? 0 : jitter.xy * render_size.xy;
     const float scale = display_size.x * render_size.z; // output pixels per input pixel
 
     float3 filtered = 0, sharp = 0, m1 = 0, m2 = 0, box_min = 1e9, box_max = -1e9;
@@ -274,7 +277,7 @@ float4 ps_taau(float4 pos : SV_Position) : SV_Target
     const float2 history_uv = uv + motion;
     float history_weight = blend.x;
 
-    if (blend.z > 0 || any(history_uv < 0) || any(history_uv > 1) || hud_mask_tex.Load(int3(clamp(center, int2(0, 0), last), 0)) > 0.5) {
+    if (blend.z > 0 || any(history_uv < 0) || any(history_uv > 1) || hud) {
         history_weight = 0; // no history, just entered the screen, or cockpit HUD drawn this frame
     }
 

@@ -178,30 +178,57 @@ namespace edaa
 
         void draw_advanced(addon_state& s, change_tracker& edit)
         {
-            ImGui::TextUnformatted("History");
-            edit(ImGui::SliderFloat("History weight", &s.config.taa_history_weight, 0.5f, 0.98f, "%.2f"));
-            edit(ImGui::SliderFloat("History weight in motion", &s.config.taa_history_weight_motion, 0.3f, 0.95f, "%.2f"));
-            edit(ImGui::SliderFloat("Min history weight (anti-flicker)", &s.config.taa_history_weight_min, 0.5f, 0.95f, "%.2f"));
-            edit(ImGui::Checkbox("Anti-flicker (luminance weighting)", &s.config.taa_anti_flicker));
-            ImGui::TextUnformatted("Clipping (lower = less ghosting, more flicker)");
-            edit(ImGui::SliderFloat("Clip box in motion (std dev)", &s.config.taa_clip_gamma, 0.5f, 3.0f, "%.2f"));
-            edit(ImGui::SliderFloat("Clip box when still (std dev)", &s.config.taa_clip_gamma_static, 0.5f, 5.0f, "%.2f"));
-            ImGui::TextUnformatted("Sampling");
-            edit(ImGui::Checkbox("Reconstruction filter (less flicker on thin highlights)", &s.config.taa_reconstruction));
-            edit(ImGui::Checkbox("Unjitter current sample (softer, used when the filter is off)", &s.config.taa_unjitter));
-            edit(ImGui::Checkbox("Soft screen edges (reuse edge history)", &s.config.taa_soft_offscreen));
-            edit(ImGui::SliderFloat("HDR compression scale (higher = bright edges flicker less)", &s.config.taa_hdr_scale, 0.01f, 1000.0f, "%.2f", ImGuiSliderFlags_Logarithmic));
+            // Only what applies to what runs now: the TAA tuning when EDAA TAA
+            // runs (its upscaling uses part of it), DLSS/XeSS have none.
+            const bool below = s.render_w != 0 && s.render_w < s.back_buffer_w;
+            const bool neural = (s.config.aa_method == static_cast<int>(aa_method::dlaa) && dlss::availability() == 1) ||
+                (s.config.aa_method == static_cast<int>(aa_method::xess) && xess::availability() == 1);
+            const bool taau = s.upscaling_active && s.upscaler_used == static_cast<int>(upscaler::taa);
+            const bool taa = !s.upscaling_active && !neural;
+
+            if (taa || taau) {
+                ImGui::TextUnformatted("History");
+                edit(ImGui::SliderFloat("History weight", &s.config.taa_history_weight, 0.5f, 0.98f, "%.2f"));
+                edit(ImGui::SliderFloat("History weight in motion", &s.config.taa_history_weight_motion, 0.3f, 0.95f, "%.2f"));
+                edit(ImGui::SliderFloat("Min history weight (anti-flicker)", &s.config.taa_history_weight_min, 0.5f, 0.95f, "%.2f"));
+                edit(ImGui::Checkbox("Anti-flicker (luminance weighting)", &s.config.taa_anti_flicker));
+                ImGui::TextUnformatted("Clipping (lower = less ghosting, more flicker)");
+                edit(ImGui::SliderFloat("Clip box in motion (std dev)", &s.config.taa_clip_gamma, 0.5f, 3.0f, "%.2f"));
+                edit(ImGui::SliderFloat("Clip box when still (std dev)", &s.config.taa_clip_gamma_static, 0.5f, 5.0f, "%.2f"));
+            }
+
+            // Native resolution TAA only (the upscaling works on the tonemapped image).
+            if (taa) {
+                ImGui::TextUnformatted("Sampling");
+                edit(ImGui::Checkbox("Reconstruction filter (less flicker on thin highlights)", &s.config.taa_reconstruction));
+
+                if (!s.config.taa_reconstruction) {
+                    edit(ImGui::Checkbox("Unjitter current sample (softer)", &s.config.taa_unjitter));
+                }
+
+                edit(ImGui::Checkbox("Soft screen edges (reuse edge history)", &s.config.taa_soft_offscreen));
+                edit(ImGui::SliderFloat("HDR compression scale (higher = bright edges flicker less)", &s.config.taa_hdr_scale, 0.01f, 1000.0f, "%.2f", ImGuiSliderFlags_Logarithmic));
+            }
+
+            if (!taa && !taau) {
+                ImGui::TextDisabled("The TAA tuning applies to EDAA TAA only.");
+            }
+
             ImGui::TextUnformatted("Scene");
             edit(ImGui::Checkbox("Resolve before the HUD pass (HUD sharp, not anti-aliased)", &s.config.taa_before_hud));
             edit(ImGui::Checkbox("Detect maps also by missing sun shadows", &s.config.map_detect_no_shadows));
             edit(ImGui::Combo("Vehicle mask", &s.config.mask_source, "Game stencil (player's vehicle)\0Distance to camera\0"));
-            edit(ImGui::Checkbox("Vehicle motion (cockpit follows head movements)", &s.config.vehicle_motion));
-            edit(ImGui::Checkbox("Lighting follows the jitter (stable shadow edges)", &s.config.fix_sun_shadows));
-            edit(ImGui::Checkbox("Below 1x, let the game upscale (bilinear or FSR) after the anti-aliasing", &s.config.game_upscale));
 
             if (s.config.mask_source == 1) {
                 edit(ImGui::SliderFloat("Vehicle mask distance (m)", &s.config.mask_distance, 0.0f, 20.0f, "%.1f"));
                 edit(ImGui::Checkbox("No vehicle mask on foot", &s.config.mask_auto_off_on_foot));
+            }
+
+            edit(ImGui::Checkbox("Vehicle motion (cockpit follows head movements)", &s.config.vehicle_motion));
+            edit(ImGui::Checkbox("Lighting follows the jitter (stable shadow edges)", &s.config.fix_sun_shadows));
+
+            if (below || s.config.game_upscale) {
+                edit(ImGui::Checkbox("Below 1x, let the game upscale (bilinear or FSR) after the anti-aliasing", &s.config.game_upscale));
             }
         }
 
