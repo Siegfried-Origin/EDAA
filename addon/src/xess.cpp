@@ -15,6 +15,8 @@
 //      resource state, output in the UAV state, back to COMMON afterwards),
 //      signals the fence;
 //   3. D3D11 waits for it and copies the shared output into in.output.
+// Both waits are GPU-side (shared fence): the CPU only waits when it would reuse
+// a command allocator still in use, i.e. never in practice (allocator_count).
 // libxess.dll is delay-loaded from the add-on folder: without it the add-on
 // still loads and XeSS reports itself unavailable.
 
@@ -129,19 +131,25 @@ namespace edaa::xess
         };
 
 
+        // Command allocators in flight: one per XeSS execution the GPU may still be
+        // running. The CPU only waits when it is this many executions ahead of
+        // the GPU, which a game never is (frame latency 3 at most): no CPU stall.
+        constexpr uint32_t allocator_count = 8;
+
+
         struct bridge
         {
             ID3D11Device* device11 = nullptr; // the game's device, not owned
             ComPtr<ID3D11Device5> device11_5;
             ComPtr<ID3D12Device> device12;
             ComPtr<ID3D12CommandQueue> queue;
-            ComPtr<ID3D12CommandAllocator> allocators[2];
+            ComPtr<ID3D12CommandAllocator> allocators[allocator_count];
             ComPtr<ID3D12GraphicsCommandList> list;
             ComPtr<ID3D12Fence> fence12;
             ComPtr<ID3D11Fence> fence11; // the same fence, opened by D3D11
             HANDLE fence_event = nullptr;
             uint64_t fence_value = 0;
-            uint64_t allocator_done[2] = {}; // fence value after which each allocator can be reset
+            uint64_t allocator_done[allocator_count] = {}; // fence value after which each allocator can be reset
             uint32_t frame = 0;
 
             shared_texture color, depth, motion, output, mask;
@@ -223,10 +231,17 @@ namespace edaa::xess
             D3D12_COMMAND_QUEUE_DESC queue = {};
             queue.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
 
-            if (failed("D3D12 queue creation failed", b.device12->CreateCommandQueue(&queue, IID_PPV_ARGS(&b.queue))) ||
-                failed("D3D12 allocator creation failed", b.device12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&b.allocators[0]))) ||
-                failed("D3D12 allocator creation failed", b.device12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&b.allocators[1]))) ||
-                failed("D3D12 command list creation failed",
+            if (failed("D3D12 queue creation failed", b.device12->CreateCommandQueue(&queue, IID_PPV_ARGS(&b.queue)))) {
+                return false;
+            }
+
+            for (ComPtr<ID3D12CommandAllocator>& allocator : b.allocators) {
+                if (failed("D3D12 allocator creation failed", b.device12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)))) {
+                    return false;
+                }
+            }
+
+            if (failed("D3D12 command list creation failed",
                     b.device12->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, b.allocators[0].Get(), nullptr, IID_PPV_ARGS(&b.list)))) {
                 return false;
             }
@@ -434,7 +449,7 @@ namespace edaa::xess
             ctx->Flush();
 
             // 2. D3D12: XeSS on our queue, after the D3D11 copies.
-            const uint32_t slot = b.frame++ % 2;
+            const uint32_t slot = b.frame++ % allocator_count;
             wait_for(b.allocator_done[slot]);
             b.allocators[slot]->Reset();
             b.list->Reset(b.allocators[slot].Get(), nullptr);
