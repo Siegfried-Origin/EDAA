@@ -1176,10 +1176,17 @@ namespace edaa
             const upscale_failure& f = upscale_failed;
             const bool failed_here = f.render_w == s.render_w && f.render_h == s.render_h && f.display_w == s.back_buffer_w &&
                 f.display_h == s.back_buffer_h && s.frame < f.frame + upscale_retry_frames;
-            const bool backend = (s.config.upscaling == static_cast<int>(upscaler::dlss) && dlss::availability() == 1) ||
-                (s.config.upscaling == static_cast<int>(upscaler::xess) && xess::availability() == 1) ||
-                s.config.upscaling == static_cast<int>(upscaler::taa);
-            in.upscaling = s.config.taa_enabled && backend && s.render_w < s.back_buffer_w && !failed_here;
+            // DLSS or XeSS that cannot run on this system: EDAA TAA upscales instead.
+            int used = s.config.upscaling;
+
+            if ((used == static_cast<int>(upscaler::dlss) && dlss::availability() != 1) ||
+                (used == static_cast<int>(upscaler::xess) && xess::availability() != 1)) {
+                used = static_cast<int>(upscaler::taa);
+            }
+
+            s.upscaler_used = used;
+            in.config.upscaling = used;
+            in.upscaling = s.config.taa_enabled && used != static_cast<int>(upscaler::game) && s.render_w < s.back_buffer_w && !failed_here;
         }
 
         // Outside the state lock: vehicle_motion takes the records lock.
@@ -1200,6 +1207,21 @@ namespace edaa
 
         const std::lock_guard<std::recursive_mutex> lock(s.mutex);
         s.motion_ok = error == nullptr;
+
+        // First launch or reset to defaults: the best method this system runs,
+        // once the backends are probed (first resolve).
+        if (s.pick_method && dlss::availability() >= 0 && xess::availability() >= 0) {
+            s.pick_method = false;
+            const aa_method best = dlss::availability() == 1 ? aa_method::dlaa
+                : xess::availability() == 1                  ? aa_method::xess
+                                                             : aa_method::taa;
+            s.config.aa_method = static_cast<int>(best);
+            sync_upscaler(s.config);
+            save_settings(s.config);
+            reshade::log::message(reshade::log::level::info, best == aa_method::dlaa ? "EDAA: default method NVIDIA DLSS" : best == aa_method::xess ? "EDAA: default method Intel XeSS"
+                                                                                                                                                    : "EDAA: default method EDAA TAA");
+        }
+
         s.vehicle_known = in.vehicle_known;
         s.upscale_pending = in.upscaling && error == nullptr;
         const bool neural_wanted = in.config.aa_method != static_cast<int>(aa_method::taa);
@@ -1289,7 +1311,7 @@ namespace edaa
             display_h = s.back_buffer_h;
             frame = s.frame;
             jitter_flip = s.config.upscaler_jitter_flip;
-            backend = s.config.upscaling;
+            backend = s.upscaler_used;
             last_image = s.ldr_image;
         }
 

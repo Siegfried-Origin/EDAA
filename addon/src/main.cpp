@@ -109,7 +109,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
                 edaa::addon_state& s = edaa::state();
                 const std::lock_guard<std::recursive_mutex> lock(s.mutex);
                 edaa::load_capture_path(s);
-                edaa::load_settings(s.config);
+                s.pick_method = !edaa::load_settings(s.config);
             }
             edaa::register_camera_events();
             edaa::register_frame_events();

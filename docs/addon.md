@@ -112,7 +112,10 @@ Per frame, in the order the game draws:
    selected in the normal build. A saved method that cannot run falls back
    to the TAA silently. Developer builds can select every method, with the
    "DLSS:" / "XeSS:" line saying why one cannot run.
-6e. **DLSS upscaling** ("Upscaling" in the overlay, work in progress): when
+6e. **Upscaling** (same "Method" choice as the anti-aliasing: below 1x,
+   DLAA becomes DLSS upscaling, XeSS Native AA XeSS upscaling and the TAA
+   EDAA TAA upscaling; `sync_upscaler`, unavailable backends fall back to
+   EDAA TAA; Advanced "let the game upscale" keeps the game's own): when
    the game renders below the display size (in-game supersampling < 1.0 or
    FSR), it tonemaps and applies SMAA at render size, then draws that image
    into the back buffer with one bilinear (or FSR) draw before the 2D UI
@@ -154,14 +157,14 @@ Per frame, in the order the game draws:
    hook stops at one atomic test (`mip_bias_on`, set at the frame start,
    cleared at the resolve): no lock, no device call. Developer builds show
    its CPU time ("mip bias" in the profiler line) and the biased binds.
-   XeSS upscaling ("Upscaling" = Intel XeSS): same path, through the D3D12
+   XeSS upscaling (Method = Intel XeSS): same path, through the D3D12
    bridge of 6c. Preset: the one whose input range
    (`xessGetOptimalInputResolution`, logged once per display size) contains
    the render size, else the closest optimal size. Flags INVERTED_DEPTH,
    LDR_INPUT_COLOR and RESPONSIVE_PIXEL_MASK: the HUD mask goes to the
    responsive mask (cleared when there is none). Depth is copied to
    R32_FLOAT first, as for XeSS Native AA.
-   EDAA TAA upscaling ("Upscaling" = EDAA TAA, `ps_taau`): same inputs
+   EDAA TAA upscaling (Method = EDAA TAA, `ps_taau`): same inputs
    (typed copy of the tonemapped image, depth, motion vectors, HUD mask), a
    display-size R16G16B16A16 history pair, output drawn into the game's
    target. Input pixel q holds the scene at q + 0.5 - jitter; each output

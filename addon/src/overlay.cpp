@@ -31,78 +31,37 @@ namespace edaa
         };
 
 
-        // Upscaling choice, the render and display sizes and the modes the upscaler offers.
+        // Render and display sizes, and the upscaling of the chosen method below 1x.
         void draw_upscaling(addon_state& s, change_tracker& edit)
         {
             ImGui::Separator();
-
-            // Same rules as the method list: unavailable backends are greyed out.
-            struct choice
-            {
-                upscaler backend;
-                const char* name;
-                int availability; // -1 not checked yet, 0 no, 1 yes
-            };
-            const choice choices[] = {
-                { upscaler::game, "Game (bilinear or FSR)", 1 },
-                { upscaler::taa, "EDAA TAA", 1 },
-                { upscaler::dlss, "NVIDIA DLSS", dlss::availability() },
-                { upscaler::xess, "Intel XeSS", xess::availability() },
-            };
-            const choice* shown = &choices[0];
-
-            for (const choice& c : choices) {
-                if (s.config.upscaling == static_cast<int>(c.backend) && (c.availability == 1 || EDAA_DEVELOPER)) {
-                    shown = &c;
-                }
-            }
-
-            if (ImGui::BeginCombo("Upscaling", shown->name)) {
-                for (const choice& c : choices) {
-                    const bool usable = c.availability == 1 || EDAA_DEVELOPER;
-                    char label[96];
-                    snprintf(label, sizeof(label), "%s%s", c.name,
-                        c.availability == 1 ? "" : c.availability == 0 ? " - not available on this system"
-                                                                       : " - checking...");
-
-                    if (ImGui::Selectable(label, &c == shown, usable ? 0 : ImGuiSelectableFlags_Disabled) &&
-                        s.config.upscaling != static_cast<int>(c.backend)) {
-                        s.config.upscaling = static_cast<int>(c.backend);
-                        s.history_reset = true;
-                        edit.changed = true;
-                    }
-                }
-
-                ImGui::EndCombo();
-            }
-
             const uint32_t render_w = s.render_w, display_w = s.back_buffer_w;
             const float scale = display_w != 0 ? static_cast<float>(render_w) / static_cast<float>(display_w) : 0.0f;
             ImGui::Text("Rendering resolution: %u x %u (%.2f x the display)", render_w, s.render_h, scale);
             ImGui::Text("Display resolution:   %u x %u", display_w, s.back_buffer_h);
 
-            if (shown->backend == upscaler::game) {
-                return;
-            }
-
             if (render_w == 0 || render_w >= display_w) {
-                ImGui::TextUnformatted("Upscaling inactive: the game renders at the display resolution.");
-                ImGui::TextUnformatted("Set the in-game supersampling below 1.0 (or an FSR mode) to use it.");
+                ImGui::TextUnformatted("Native resolution: anti-aliasing only. Set the in-game supersampling");
+                ImGui::TextUnformatted("below 1.0 (or an FSR mode) to upscale with the same method.");
                 return;
             }
 
-            const bool use_xess = shown->backend == upscaler::xess;
+            const auto used = static_cast<upscaler>(s.upscaler_used);
+
+            if (s.config.game_upscale) {
+                ImGui::TextUnformatted("Upscaling: the game's (bilinear or FSR), after the anti-aliasing (Advanced).");
+                return;
+            }
+
+            const bool use_xess = used == upscaler::xess;
             edit(ImGui::Checkbox("HUD mask (cockpit HUD from the current frame: no trails)", &s.config.upscale_hud_mask));
             edit(ImGui::Checkbox("Texture mip bias (display resolution texture detail)", &s.config.upscale_mip_bias));
-            ImGui::Text("Upscaling: %s", s.upscale_status);
-
-            if (shown->backend != upscaler::taa) {
-                ImGui::Text("%s: %s", use_xess ? "XeSS" : "DLSS", use_xess ? xess::status().c_str() : dlss::status().c_str());
-            }
-
+            ImGui::Text("Upscaling (%s): %s", use_xess ? "XeSS" : used == upscaler::taa ? "EDAA TAA"
+                                                                                        : "DLSS",
+                s.upscale_status);
             ImGui::Text("Jitter: %d phases, texture LOD bias %+.2f", s.jitter_phases, s.mip_bias_value.load());
 
-            if (shown->backend == upscaler::taa) {
+            if (used == upscaler::taa) {
                 edit(ImGui::SliderFloat("Sharpness", &s.config.upscale_sharpness, 0.0f, 1.0f, "%.2f"));
                 ImGui::TextUnformatted("Any scale works; the TAA settings (Advanced) apply.");
                 return;
@@ -158,10 +117,11 @@ namespace edaa
             };
             const choice choices[] = {
                 { aa_method::taa, "EDAA TAA", 1 },
-                { aa_method::dlaa, "NVIDIA DLAA (DLSS at native resolution)", dlss::availability() },
-                { aa_method::xess, "Intel XeSS (Native AA)", xess::availability() },
+                { aa_method::dlaa, "NVIDIA DLSS (DLAA at native resolution)", dlss::availability() },
+                { aa_method::xess, "Intel XeSS", xess::availability() },
             };
             // A saved method that cannot run is replaced by the TAA (passes.cpp).
+            // The same choice sets the upscaler used below 1x (sync_upscaler).
             const choice* shown = &choices[0];
 
             for (const choice& c : choices) {
@@ -169,9 +129,6 @@ namespace edaa
                     shown = &c;
                 }
             }
-
-            // Upscaling with DLSS/XeSS: the upscaler also does the anti-aliasing.
-            ImGui::BeginDisabled(s.upscaling_active);
 
             if (ImGui::BeginCombo("Method", shown->name)) {
                 for (const choice& c : choices) {
@@ -190,12 +147,6 @@ namespace edaa
                 }
 
                 ImGui::EndCombo();
-            }
-
-            ImGui::EndDisabled();
-
-            if (s.upscaling_active) {
-                ImGui::TextDisabled("Not used while upscaling: the upscaler also does the anti-aliasing (see Upscaling).");
             }
 
             ImGui::Text("Status: %s", s.config.taa_enabled ? s.motion_status : "off");
@@ -219,6 +170,7 @@ namespace edaa
 
             if (ImGui::Button("Reset to defaults")) {
                 s.config = settings{};
+                s.pick_method = true; // DLSS, else XeSS, else TAA
                 edit.changed = true;
             }
         }
@@ -245,6 +197,7 @@ namespace edaa
             edit(ImGui::Combo("Vehicle mask", &s.config.mask_source, "Game stencil (player's vehicle)\0Distance to camera\0"));
             edit(ImGui::Checkbox("Vehicle motion (cockpit follows head movements)", &s.config.vehicle_motion));
             edit(ImGui::Checkbox("Lighting follows the jitter (stable shadow edges)", &s.config.fix_sun_shadows));
+            edit(ImGui::Checkbox("Below 1x, let the game upscale (bilinear or FSR) after the anti-aliasing", &s.config.game_upscale));
 
             if (s.config.mask_source == 1) {
                 edit(ImGui::SliderFloat("Vehicle mask distance (m)", &s.config.mask_distance, 0.0f, 20.0f, "%.1f"));
@@ -469,6 +422,7 @@ namespace edaa
         ImGui::TextDisabled("Fly safe, fly smooth - CMDR Siegfried-Origin");
 
         if (edit.changed) {
+            sync_upscaler(s.config);
             save_settings(s.config);
         }
     }

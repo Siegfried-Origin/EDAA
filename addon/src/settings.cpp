@@ -4,6 +4,7 @@
 #include "state.hpp"
 
 #include <cstddef>
+#include <cstring>
 
 namespace edaa
 {
@@ -52,7 +53,7 @@ namespace edaa
             EDAA_FIELD(fix_sun_shadows, boolean),
             EDAA_FIELD(vehicle_motion, boolean),
             EDAA_FIELD(aa_method, integer),
-            EDAA_FIELD(upscaling, integer),
+            EDAA_FIELD(game_upscale, boolean),
             EDAA_FIELD(upscale_hud_mask, boolean),
             EDAA_FIELD(upscale_mip_bias, boolean),
             EDAA_FIELD(upscale_sharpness, real),
@@ -63,9 +64,10 @@ namespace edaa
     }
 
 
-    void load_settings(settings& config)
+    bool load_settings(settings& config)
     {
         auto* const base = reinterpret_cast<char*>(&config);
+        bool method_saved = false;
 
         for (const field& f : fields) {
             void* const p = base + f.offset;
@@ -81,7 +83,9 @@ namespace edaa
                         break;
                     }
                 case field_type::integer:
-                    reshade::get_config_value(nullptr, section, f.key, *static_cast<int*>(p));
+                    if (reshade::get_config_value(nullptr, section, f.key, *static_cast<int*>(p)) && std::strcmp(f.key, "aa_method") == 0) {
+                        method_saved = true;
+                    }
                     break;
                 case field_type::real:
                     reshade::get_config_value(nullptr, section, f.key, *static_cast<float*>(p));
@@ -90,6 +94,8 @@ namespace edaa
         }
 
         config.debug = static_cast<int>(debug_view::off);
+        sync_upscaler(config);
+        return method_saved;
     }
 
 

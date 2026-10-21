@@ -44,8 +44,9 @@ namespace edaa
 
     struct settings
     {
-        int aa_method = 0; // aa_method
-        int upscaling = 0; // upscaler
+        int aa_method = 0; // aa_method: the one choice of the overlay
+        int upscaling = 0; // upscaler: derived from aa_method (sync_upscaler)
+        bool game_upscale = false; // below 1x: the game upscales (bilinear/FSR) after the anti-aliasing
         bool upscale_hud_mask = true; // upscaling: the cockpit HUD uses the current frame only (no trails)
         float upscale_sharpness = 0.5f; // EDAA TAA upscaling: contrast-adaptive sharpening, 0..1
         bool upscale_mip_bias = true; // upscaling: scene textures sampled with the display resolution mips (mip_bias.cpp)
@@ -178,7 +179,9 @@ namespace edaa
         uint32_t render_w = 0, render_h = 0;
         uint32_t back_buffer_w = 0, back_buffer_h = 0; // swap chain size, from Present (display size)
         int jitter_phases = 8; // Halton phases in use: the setting x (display / render)^2 when upscaling
-        bool upscaling_active = false; // last frame was upscaled (DLSS, XeSS or EDAA TAA): the method above is not used
+        bool upscaling_active = false; // last frame was upscaled (DLSS, XeSS or EDAA TAA)
+        int upscaler_used = 0; // upscaler of the frame in progress: the chosen one, EDAA TAA if it cannot run
+        bool pick_method = false; // first launch or reset: choose DLSS, else XeSS, else TAA once they are probed
         uint64_t scene_color = 0; // HDR scene target (G-buffer RT3, R11G11B10), resolved by TAA
         uint64_t depth_candidate = 0; // largest such depth buffer in the frame in progress
         uint64_t color_candidate = 0; // its HDR target
@@ -253,7 +256,23 @@ namespace edaa
     addon_state& state();
 
     // Settings saved in ReShade.ini, section [EDAA] (settings.cpp).
-    void load_settings(settings& config);
+    // Returns false when no method was saved yet (first launch).
+    bool load_settings(settings& config);
+
+
+    // One choice for both: below the display resolution, the method's own
+    // upscaler (DLAA -> DLSS, XeSS Native AA -> XeSS upscaling, TAA -> TAA
+    // upscaling), unless the game's own upscale is kept.
+    inline void sync_upscaler(settings& c)
+    {
+        const upscaler u = c.game_upscale                      ? upscaler::game
+            : c.aa_method == static_cast<int>(aa_method::dlaa) ? upscaler::dlss
+            : c.aa_method == static_cast<int>(aa_method::xess) ? upscaler::xess
+                                                               : upscaler::taa;
+        c.upscaling = static_cast<int>(u);
+    }
+
+
     void save_settings(const settings& config);
 
 
