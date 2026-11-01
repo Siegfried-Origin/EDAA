@@ -339,6 +339,12 @@ defaults" restores the values below. The debug view always starts off.
   plane >= 2 cm) pauses jitter and TAA from that frame on, until 30 frames
   after the last tile; the history is then reset. Overlay and log say
   "high-resolution screenshot". See reverse-engineering.md section 9.
+  Only tiles with the screen's aspect ratio count (off-centre terms removed:
+  scale = sqrt(column length^2 - off_center^2), compared with the last centred
+  main camera, 2 % tolerance): the game also renders the galaxy background
+  of a system as square off-centre tiles (aspect 1, 8x zoom) when it loads
+  and during the hyperspace tunnel, which used to pause the TAA for ~6 s at
+  every jump.
 * Shader hashes are those of game build `2026.09.03.332841`; a game update
   may change them (the structural markers keep working, the log says which
   shaders were found).
