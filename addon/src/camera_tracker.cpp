@@ -22,6 +22,13 @@ namespace edaa
         std::mutex mapped_mutex;
         std::unordered_map<uint64_t, void*> mapped;
 
+        // [diag] Last centred perspective camera (near >= 2 cm), to compare with
+        // the off-centre ones that trigger the screenshot detection, and the
+        // number of off-centre updates logged in the current episode.
+        float diag_centred_near = 0, diag_centred_vfov = 0, diag_centred_aspect = 0;
+        int diag_episode_logs = 0;
+        constexpr int diag_max_logs_per_episode = 12;
+
 
         bool is_large_constant_buffer(device* device, resource resource)
         {
@@ -98,7 +105,31 @@ namespace edaa
             // this very frame on (the update comes before the scene draws), and
             // for a while after the last tile. Views with a near plane below 2 cm
             // (small offscreen views) are off-centre in normal frames too.
-            if (info.near_plane >= 0.02f && (std::fabs(info.off_center[0]) > 0.01f || std::fabs(info.off_center[1]) > 0.01f)) {
+            const bool diag_off_centre = std::fabs(info.off_center[0]) > 0.01f || std::fabs(info.off_center[1]) > 0.01f;
+
+            if (info.near_plane >= 0.02f && !diag_off_centre) {
+                diag_centred_near = info.near_plane;
+                diag_centred_vfov = info.vfov_deg;
+                diag_centred_aspect = info.aspect;
+            }
+
+            if (info.near_plane >= 0.02f && diag_off_centre) {
+                if (!s.screenshot_mode) {
+                    diag_episode_logs = 0;
+                }
+
+                if (diag_episode_logs < diag_max_logs_per_episode) {
+                    ++diag_episode_logs;
+                    char msg[384];
+                    snprintf(msg, sizeof(msg),
+                        "EDAA diag: off-centre camera #%d: near %g vfov %g aspect %g off_center %g %g sx %g sy %g | last centred: near %g vfov %g aspect %g",
+                        diag_episode_logs, info.near_plane, info.vfov_deg, info.aspect, info.off_center[0], info.off_center[1], info.sx, info.sy,
+                        diag_centred_near, diag_centred_vfov, diag_centred_aspect);
+                    reshade::log::message(reshade::log::level::info, msg);
+                }
+            }
+
+            if (info.near_plane >= 0.02f && diag_off_centre) {
                 if (!s.screenshot_mode) {
                     reshade::log::message(reshade::log::level::info, "EDAA: high-resolution screenshot, TAA paused");
                 }
