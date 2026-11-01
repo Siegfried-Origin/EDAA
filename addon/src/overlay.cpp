@@ -153,6 +153,37 @@ namespace edaa
 
             if (s.config.aa_method == static_cast<int>(aa_method::dlaa) && (EDAA_DEVELOPER || dlss::availability() == 1)) {
                 ImGui::Text("DLSS: %s", dlss::status().c_str());
+
+                // Model (render preset hint). Values are NVSDK_NGX_DLSS_Hint_Render_Preset.
+                struct preset_choice
+                {
+                    int value;
+                    const char* label;
+                };
+                static const preset_choice presets[] = {
+                    { 0, "Default (NVIDIA: K for DLAA)" },
+                    { 11, "K - transformer, best quality" },
+                    { 10, "J - transformer, less ghosting, more flicker" },
+                    { 13, "M - 2nd gen transformer (Performance default)" },
+                    { 12, "L - 2nd gen transformer (Ultra Performance default)" },
+                };
+
+                const char* current = presets[0].label;
+
+                for (const preset_choice& p : presets) {
+                    current = p.value == s.config.dlss_preset ? p.label : current;
+                }
+
+                if (ImGui::BeginCombo("DLSS model", current)) {
+                    for (const preset_choice& p : presets) {
+                        if (ImGui::Selectable(p.label, p.value == s.config.dlss_preset) && p.value != s.config.dlss_preset) {
+                            s.config.dlss_preset = p.value;
+                            edit.changed = true;
+                        }
+                    }
+
+                    ImGui::EndCombo();
+                }
             }
             else if (s.config.aa_method == static_cast<int>(aa_method::xess) && (EDAA_DEVELOPER || xess::availability() == 1)) {
                 ImGui::Text("XeSS: %s", xess::status().c_str());

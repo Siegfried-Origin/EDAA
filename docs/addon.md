@@ -262,6 +262,7 @@ defaults" restores the values below. The debug view always starts off.
 | Unjitter current sample | off | softer image (when the filter is off) |
 | Resolve before the HUD pass | on | HUD/holograms out of the TAA |
 | Upscaling | Game | Game (bilinear or FSR) or NVIDIA DLSS when rendering below the display size |
+| DLSS model | Default | render preset hint passed to NGX when the DLSS feature is created (DLAA and upscaling): Default (NVIDIA's choice, K for DLAA in the 310.x SDK), K, J, M or L; `[EDAA] dlss_preset` in `ReShade.ini` (0, 11, 10, 13, 12) |
 | Vehicle mask | game stencil | or distance to camera (with auto-off on foot) |
 | Capture folder (developer) | `%USERPROFILE%\Documents\EDAA-captures` | stored as `[EDAA] CapturePath` in `ReShade.ini` |
 
