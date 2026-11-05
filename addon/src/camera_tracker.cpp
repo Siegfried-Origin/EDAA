@@ -22,6 +22,21 @@ namespace edaa
         std::mutex mapped_mutex;
         std::unordered_map<uint64_t, void*> mapped;
 
+        // Aspect ratio (sy / sx) of the main camera, taken from the last frame
+        // whose main camera was centred: the screen's aspect ratio in game.
+        float main_aspect = 0.0f;
+
+
+        // Aspect ratio of an off-centre projection without its off-centre terms:
+        // the x/y columns are scale * axis + off_center * forward, so the scale
+        // is sqrt(length^2 - off_center^2). 0 if it cannot be computed.
+        float tile_aspect(const camera_info& info)
+        {
+            const float sx2 = info.sx * info.sx - info.off_center[0] * info.off_center[0];
+            const float sy2 = info.sy * info.sy - info.off_center[1] * info.off_center[1];
+            return sx2 > 0.0f && sy2 > 0.0f ? std::sqrt(sy2 / sx2) : 0.0f;
+        }
+
 
         bool is_large_constant_buffer(device* device, resource resource)
         {
@@ -98,7 +113,28 @@ namespace edaa
             // this very frame on (the update comes before the scene draws), and
             // for a while after the last tile. Views with a near plane below 2 cm
             // (small offscreen views) are off-centre in normal frames too.
-            if (info.near_plane >= 0.02f && (std::fabs(info.off_center[0]) > 0.01f || std::fabs(info.off_center[1]) > 0.01f)) {
+            //
+            // The game also renders the galaxy background of a system as square,
+            // off-centre tiles (aspect 1, 8x zoom) when the game loads and during
+            // the hyperspace tunnel. Screenshot tiles keep the screen's aspect
+            // ratio, so off-centre views of another aspect are not screenshots.
+            const auto is_off_centre = [](const camera_info& c) {
+                return std::fabs(c.off_center[0]) > 0.01f || std::fabs(c.off_center[1]) > 0.01f;
+            };
+            const bool off_centre = is_off_centre(info);
+
+            if (s.camera.valid && s.camera.info.kind == view_kind::perspective && !is_off_centre(s.camera.info)) {
+                main_aspect = s.camera.info.aspect;
+            }
+
+            bool screen_shaped = true; // unknown screen aspect: keep the old behaviour
+
+            if (off_centre && main_aspect > 0.0f) {
+                const float aspect = tile_aspect(info);
+                screen_shaped = aspect > 0.0f && std::fabs(aspect - main_aspect) < 0.02f * main_aspect;
+            }
+
+            if (info.near_plane >= 0.02f && off_centre && screen_shaped) {
                 if (!s.screenshot_mode) {
                     reshade::log::message(reshade::log::level::info, "EDAA: high-resolution screenshot, TAA paused");
                 }
