@@ -20,6 +20,15 @@ jobs:
           # ReShade, ImGui, the DLSS and XeSS SDKs (shallow, at the pinned commits).
           submodules: true
 
+      # NVIDIA Streamline SDK (DLSS Frame Generation): headers for the build,
+      # production DLLs shipped next to the add-on.
+      - name: Get Streamline SDK
+        shell: pwsh
+        run: |
+          $url = "https://github.com/NVIDIA-RTX/Streamline/releases/download/v2.14.16/streamline-sdk-v2.14.16.zip"
+          Invoke-WebRequest -Uri $url -OutFile sl.zip
+          Expand-Archive sl.zip -DestinationPath third_party/streamline -Force
+
       - name: Version from tag
         id: version
         shell: pwsh
@@ -57,6 +66,10 @@ jobs:
           Copy-Item third_party\imgui\LICENSE.txt "$zip\licenses\ImGui-LICENSE.txt"
           Copy-Item third_party\xess\LICENSE.txt "$zip\licenses\Intel-XeSS-LICENSE.txt"
           Copy-Item third_party\xess\third-party-programs.txt "$zip\licenses\Intel-XeSS-third-party-programs.txt"
+          # DLSS Frame Generation (NVIDIA Streamline).
+          Copy-Item build\Release\sl.interposer.dll, build\Release\sl.common.dll, build\Release\sl.dlss_g.dll, build\Release\sl.reflex.dll, build\Release\sl.pcl.dll, build\Release\nvngx_dlssg.dll $zip
+          Copy-Item third_party\streamline\license.txt "$zip\licenses\NVIDIA-Streamline-LICENSE.txt"
+          Copy-Item third_party\streamline\external\ngx-sdk\license.txt "$zip\licenses\NVIDIA-NGX-SDK-LICENSE.txt"
           Compress-Archive -Path "$zip\*" -DestinationPath "installer\Output\EDAA-${{ steps.version.outputs.version }}.zip"
 
       - name: Publish release

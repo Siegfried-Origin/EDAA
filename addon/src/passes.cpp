@@ -20,6 +20,7 @@
 
 #include "profile.hpp"
 #include "events.hpp"
+#include "fg.hpp"
 #include "state.hpp"
 
 #include <algorithm>
@@ -89,7 +90,7 @@ namespace edaa
         {
             ID3D11Device* device = nullptr; // not owned
             ComPtr<ID3D11VertexShader> vs;
-            ComPtr<ID3D11PixelShader> ps_motion, ps_debug, ps_taa, ps_copy, ps_hud_mask, ps_taau, ps_sharpen;
+            ComPtr<ID3D11PixelShader> ps_motion, ps_debug, ps_taa, ps_copy, ps_hud_mask, ps_taau, ps_sharpen, ps_fg_motion;
             ComPtr<ID3D11Buffer> motion_cb, taa_cb, object_cb;
             ComPtr<ID3D11SamplerState> linear_clamp;
             ComPtr<ID3D11BlendState> max_blend; // HUD mask accumulation
@@ -121,6 +122,13 @@ namespace edaa
         std::mutex gpu_mutex;
         gpu_resources gpu;
         std::atomic<uint64_t> watched_depth{ 0 }, watched_color{ 0 };
+
+        // Frame generation HUD protection (gpu_mutex): this frame's HUD mask is
+        // being built from a snapshot taken after the anti-aliasing.
+        bool fg_mask_valid = false;
+        std::atomic<bool> fg_snapshot_taken{ false }; // read by the resolve caller
+        ComPtr<ID3D11RenderTargetView> fg_motion_rtv; // on the shared motion texture
+        ID3D11Texture2D* fg_motion_rtv_tex = nullptr;
 
 
         // Inverse of a 4x4 matrix (row-major), in double precision. Returns false if singular.
@@ -220,6 +228,7 @@ namespace edaa
                 SUCCEEDED(device->CreatePixelShader(g_ps_hud_mask, sizeof(g_ps_hud_mask), nullptr, &gpu.ps_hud_mask)) &&
                 SUCCEEDED(device->CreatePixelShader(g_ps_taau, sizeof(g_ps_taau), nullptr, &gpu.ps_taau)) &&
                 SUCCEEDED(device->CreatePixelShader(g_ps_sharpen, sizeof(g_ps_sharpen), nullptr, &gpu.ps_sharpen)) &&
+                SUCCEEDED(device->CreatePixelShader(g_ps_fg_motion, sizeof(g_ps_fg_motion), nullptr, &gpu.ps_fg_motion)) &&
                 SUCCEEDED(device->CreateSamplerState(&sampler, &gpu.linear_clamp)) &&
                 SUCCEEDED(device->CreateBlendState(&max_blend, &gpu.max_blend)) &&
                 create_buffer(sizeof(motion_constants), gpu.motion_cb) &&
@@ -638,7 +647,7 @@ namespace edaa
         // first are combined with max blending.
         void draw_hud_mask(ID3D11DeviceContext* ctx, bool final)
         {
-            if (!upscale_in.snapshot || upscale_in.mask_final || !gpu.color.srv ||
+            if (!upscale_in.snapshot || upscale_in.mask_final || !gpu.color.srv || !gpu.hud_snapshot.srv ||
                 (!gpu.hud_mask.tex && !create_target(DXGI_FORMAT_R8_UNORM, gpu.hud_mask))) {
                 return;
             }
@@ -798,6 +807,49 @@ namespace edaa
         }
 
 
+        // True if 'source' can be copied into the HUD snapshot (same size and
+        // format family): the game swaps its targets (e.g. station services).
+        bool snapshot_fits(ID3D11Resource* source)
+        {
+            ComPtr<ID3D11Texture2D> tex;
+
+            if (source == nullptr || !gpu.hud_snapshot.tex || FAILED(source->QueryInterface(IID_PPV_ARGS(&tex)))) {
+                return false;
+            }
+
+            D3D11_TEXTURE2D_DESC src, dst;
+            tex->GetDesc(&src);
+            gpu.hud_snapshot.tex->GetDesc(&dst);
+            const DXGI_FORMAT typed = src.Format == DXGI_FORMAT_R16G16B16A16_TYPELESS ? DXGI_FORMAT_R16G16B16A16_FLOAT : src.Format;
+            return src.Width == dst.Width && src.Height == dst.Height && src.SampleDesc.Count == 1 && src.ArraySize == 1 && typed == dst.Format;
+        }
+
+
+        // Frame generation HUD protection: the scene after the anti-aliasing,
+        // compared at the bloom with the scene holding the HUD (draw_hud_mask).
+        // Not when upscaling: that path takes its own snapshot.
+        void fg_snapshot(ID3D11DeviceContext* ctx, const resolve_inputs& in)
+        {
+            if (!fg::wants_inputs() || !in.config.fg_hud_protect || in.upscaling || !gpu.color.srv ||
+                (!gpu.hud_snapshot.tex && !create_target(gpu.color_format, gpu.hud_snapshot))) {
+                return;
+            }
+
+            if (!snapshot_fits(reinterpret_cast<ID3D11Resource*>(in.scene_color))) {
+                upscale_in.snapshot = false;
+                fg_mask_valid = false;
+                return;
+            }
+
+            ctx->CopyResource(gpu.hud_snapshot.tex.Get(), reinterpret_cast<ID3D11Resource*>(in.scene_color));
+            upscale_in.snapshot = true;
+            upscale_in.hud_mask = false;
+            upscale_in.mask_final = false;
+            fg_mask_valid = true;
+            fg_snapshot_taken = true;
+        }
+
+
         const char* resolve(ID3D11Device* device, ID3D11DeviceContext* ctx, const resolve_inputs& in)
         {
             if (in.render_w == 0 || in.scene_depth == 0 || in.scene_color == 0) {
@@ -881,6 +933,40 @@ namespace edaa
             ctx->PSSetShader(gpu.ps_motion.Get(), nullptr, 0);
             ctx->Draw(3, 0);
 
+            // Frame generation (fg_present.cpp): depth (typed R32_FLOAT copy) and
+            // motion vectors of this frame, with the camera, for DLSS-G at Present.
+            if (fg::wants_inputs() && (gpu.depth_copy.tex || create_target(DXGI_FORMAT_R32_FLOAT, gpu.depth_copy))) {
+                bind_srvs(ctx, {});
+                ID3D11RenderTargetView* const depth_target[] = { gpu.depth_copy.rtv.Get() };
+                ctx->OMSetRenderTargets(1, depth_target, nullptr);
+                bind_srvs(ctx, { nullptr, gpu.depth.srv.Get() });
+                ctx->PSSetShader(gpu.ps_copy.Get(), nullptr, 0);
+                ctx->Draw(3, 0);
+                bind_srvs(ctx, {});
+                ctx->OMSetRenderTargets(0, nullptr, nullptr);
+
+                fg::frame_inputs f;
+                f.render_w = in.render_w;
+                f.render_h = in.render_h;
+                f.jitter_x = in.jitter_x;
+                f.jitter_y = in.jitter_y;
+                f.reset = in.camera_cut;
+                std::memcpy(f.view_proj, in.camera.view_proj, sizeof(f.view_proj));
+                std::memcpy(f.inv_view_proj, mc.inv_view_proj, sizeof(f.inv_view_proj));
+                std::memcpy(f.prev_view_proj, in.prev_camera.view_proj, sizeof(f.prev_view_proj));
+                std::memcpy(f.camera_delta, mc.camera_delta, sizeof(f.camera_delta));
+                std::memcpy(f.camera_pos, in.camera.position, sizeof(f.camera_pos));
+                f.near_plane = in.camera.info.near_plane;
+                f.vfov_deg = in.camera.info.vfov_deg;
+                f.aspect = in.camera.info.aspect;
+                f.sx = in.camera.info.sx;
+                f.sy = in.camera.info.sy;
+                fg::capture(ctx, gpu.depth_copy.tex.Get(), gpu.motion.tex.Get(), f);
+                // The next pass binds its own targets and shaders.
+                bind_fullscreen(ctx);
+                set_viewport(ctx, w, h);
+            }
+
             if (!in.config.taa_enabled || in.upscaling) {
                 gpu.history_valid = false;
                 gpu.upscaler_last = -1;
@@ -907,6 +993,7 @@ namespace edaa
             if (available && run_upscaler(device, ctx, in, method)) {
                 upscaler_used = in.config.aa_method;
                 gpu.history_valid = false; // the TAA history is stale when switching back
+                fg_snapshot(ctx, in);
                 return nullptr;
             }
 
@@ -943,6 +1030,7 @@ namespace edaa
 
             gpu.history_index = 1 - gpu.history_index;
             gpu.history_valid = true;
+            fg_snapshot(ctx, in);
             return nullptr;
         }
 
@@ -1007,6 +1095,11 @@ namespace edaa
         void on_present(command_queue* queue, swapchain* swapchain, const rect*, const rect*, uint32_t, const rect*)
         {
             EDAA_PROFILE(present);
+
+            if (!is_game_device(queue->get_device())) {
+                return; // e.g. the D3D12 swap chain of the frame generation test
+            }
+
             addon_state& s = state();
             const resource back_buffer = swapchain->get_current_back_buffer();
             const resource_desc bb_desc = queue->get_device()->get_resource_desc(back_buffer);
@@ -1124,6 +1217,9 @@ namespace edaa
             xess::release(reinterpret_cast<ID3D11Device*>(device->get_native()));
             watched_depth = 0;
             watched_color = 0;
+            fg_motion_rtv.Reset();
+            fg_motion_rtv_tex = nullptr;
+            fg_mask_valid = false;
             gpu = {};
         }
     }
@@ -1208,6 +1304,8 @@ namespace edaa
 
         const std::lock_guard<std::recursive_mutex> lock(s.mutex);
         s.motion_ok = error == nullptr;
+        s.resolve_ran = true;
+        s.fg_hud_pending = fg_snapshot_taken.exchange(false) && error == nullptr;
 
         // First launch or reset to defaults: the best method this system runs,
         // once the backends are probed (first resolve).
@@ -1281,7 +1379,8 @@ namespace edaa
         try {
             const std::lock_guard<std::mutex> lock(gpu_mutex);
 
-            if (gpu.device != device || !upscale_in.snapshot || upscale_in.mask_final || gpu.color.handle == 0) {
+            if (gpu.device != device || !upscale_in.snapshot || upscale_in.mask_final || gpu.color.handle == 0 ||
+                !snapshot_fits(reinterpret_cast<ID3D11Resource*>(gpu.color.handle))) {
                 return;
             }
 
@@ -1479,5 +1578,54 @@ namespace edaa
         watched_depth = 0;
         watched_color = 0;
         gpu = {};
+    }
+
+
+    bool fg::apply_hud_motion(ID3D11DeviceContext* ctx, ID3D11Texture2D* target)
+    {
+        try {
+            const std::lock_guard<std::mutex> lock(gpu_mutex);
+            ComPtr<ID3D11Device> device;
+            ctx->GetDevice(&device);
+
+            if (!fg_mask_valid || !upscale_in.hud_mask || device.Get() != gpu.device || !gpu.hud_mask.srv || !gpu.motion.srv || !gpu.ps_fg_motion) {
+                fg_mask_valid = false;
+                return false;
+            }
+
+            fg_mask_valid = false;
+            D3D11_TEXTURE2D_DESC desc;
+            target->GetDesc(&desc);
+
+            if (desc.Width != gpu.width || desc.Height != gpu.height) {
+                return false;
+            }
+
+            if (fg_motion_rtv_tex != target || !fg_motion_rtv) {
+                fg_motion_rtv.Reset();
+                fg_motion_rtv_tex = nullptr;
+
+                if (FAILED(device->CreateRenderTargetView(target, nullptr, &fg_motion_rtv))) {
+                    return false;
+                }
+
+                fg_motion_rtv_tex = target;
+            }
+
+            const state_backup backup(ctx);
+            bind_fullscreen(ctx);
+            set_viewport(ctx, static_cast<float>(gpu.width), static_cast<float>(gpu.height));
+            bind_srvs(ctx, {});
+            ID3D11RenderTargetView* const targets[] = { fg_motion_rtv.Get() };
+            ctx->OMSetRenderTargets(1, targets, nullptr);
+            bind_srvs(ctx, { nullptr, nullptr, gpu.motion.srv.Get(), nullptr, gpu.hud_mask.srv.Get() });
+            ctx->PSSetShader(gpu.ps_fg_motion.Get(), nullptr, 0);
+            ctx->Draw(3, 0);
+            bind_srvs(ctx, {});
+            return true;
+        }
+        catch (...) {
+            return false;
+        }
     }
 }

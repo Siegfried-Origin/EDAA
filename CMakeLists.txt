@@ -38,7 +38,8 @@ add_custom_command(
 	COMMAND ${FXC} /nologo /O3 /T ps_5_0 /E ps_hud_mask /Vn g_ps_hud_mask /Fh ${SHADER_OUT}/ps_hud_mask.h ${TAA_SRC}
 	COMMAND ${FXC} /nologo /O3 /T ps_5_0 /E ps_taau /Vn g_ps_taau /Fh ${SHADER_OUT}/ps_taau.h ${TAA_SRC}
 	COMMAND ${FXC} /nologo /O3 /T ps_5_0 /E ps_sharpen /Vn g_ps_sharpen /Fh ${SHADER_OUT}/ps_sharpen.h ${TAA_SRC}
-	COMMAND ${CMAKE_COMMAND} -DOUT=${TAA_HEADER} -DHEADERS=ps_taa.h,ps_copy.h,ps_hud_mask.h,ps_taau.h,ps_sharpen.h -P ${CMAKE_SOURCE_DIR}/addon/shaders/combine.cmake
+	COMMAND ${FXC} /nologo /O3 /T ps_5_0 /E ps_fg_motion /Vn g_ps_fg_motion /Fh ${SHADER_OUT}/ps_fg_motion.h ${TAA_SRC}
+	COMMAND ${CMAKE_COMMAND} -DOUT=${TAA_HEADER} -DHEADERS=ps_taa.h,ps_copy.h,ps_hud_mask.h,ps_taau.h,ps_sharpen.h,ps_fg_motion.h -P ${CMAKE_SOURCE_DIR}/addon/shaders/combine.cmake
 	DEPENDS ${TAA_SRC} ${CMAKE_SOURCE_DIR}/addon/shaders/combine.cmake
 	COMMENT "Compiling taa.hlsl"
 )
@@ -78,6 +79,7 @@ add_library(edaa SHARED
 	addon/src/settings.cpp
 	addon/src/dlss.cpp
 	addon/src/xess.cpp
+	addon/src/fg_present.cpp
 	addon/edaa.rc
 	${SHADER_HEADER}
 	${TAA_HEADER}
@@ -124,6 +126,23 @@ if(EDAA_WITH_XESS AND EXISTS ${XESS_DIR}/inc/xess/xess_d3d12.h)
 else()
 	target_compile_definitions(edaa PRIVATE EDAA_XESS=0)
 	message(STATUS "Building without XeSS (EDAA_WITH_XESS off or SDK not in third_party/xess)")
+endif()
+# NVIDIA Streamline (DLSS Frame Generation, experimental): headers only, the DLLs
+# are loaded at run time from the add-on folder. third_party/streamline is the
+# extracted SDK zip (CI downloads it); the DLLs are shipped next to EDAA.addon64.
+option(EDAA_WITH_STREAMLINE "Build with NVIDIA Streamline when the SDK is present" ON)
+set(SL_DIR ${CMAKE_SOURCE_DIR}/third_party/streamline)
+if(EDAA_WITH_STREAMLINE AND EXISTS ${SL_DIR}/include/sl_dlss_g.h)
+	target_include_directories(edaa SYSTEM PRIVATE ${SL_DIR}/include)
+	target_compile_definitions(edaa PRIVATE EDAA_SL=1)
+	# Production Streamline DLLs and the DLSS-G library next to EDAA.addon64.
+	foreach(SL_DLL sl.interposer.dll sl.common.dll sl.dlss_g.dll sl.reflex.dll sl.pcl.dll nvngx_dlssg.dll)
+		add_custom_command(TARGET edaa POST_BUILD
+			COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SL_DIR}/bin/x64/${SL_DLL} $<TARGET_FILE_DIR:edaa>)
+	endforeach()
+else()
+	target_compile_definitions(edaa PRIVATE EDAA_SL=0)
+	message(STATUS "Building without Streamline (SDK not in third_party/streamline)")
 endif()
 # C4702 (unreachable code) is reported by the optimizer inside reshade_overlay.hpp.
 target_compile_options(edaa PRIVATE /W4 /permissive- /utf-8 /wd4702)

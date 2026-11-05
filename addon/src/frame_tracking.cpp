@@ -23,6 +23,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -602,6 +603,15 @@ namespace edaa
         }
 
 
+        // Width of the game's exposure downsample (R11G11B10): a quarter of the
+        // render width, but never below 320 pixels (seen at 960x540: 320x180).
+        bool is_exposure_width(uint32_t w, uint32_t render_w)
+        {
+            const uint32_t expected = std::max(render_w / 4, 320u);
+            return w + 1 >= expected && w <= expected + 1;
+        }
+
+
         // TAA resolve point. Live frame order (docs/reverse-engineering.md
         // section 3): ... sky, planets, world transparents -> exposure downsample
         // of the HDR scene (R11G11B10 at 1/4 size) -> last group of draws into
@@ -632,7 +642,7 @@ namespace edaa
                 }
 
                 if (ctx->rt0 != 0 && ctx->rt0 != s.scene_color && ctx->rt0_format == format::r11g11b10_float &&
-                    ctx->rt0_w * 4 + 4 >= s.render_w && ctx->rt0_w * 4 <= s.render_w + 4) {
+                    is_exposure_width(ctx->rt0_w, s.render_w)) {
                     s.current.exposure_downsample = true;
                 }
 
@@ -645,7 +655,7 @@ namespace edaa
                 const bool into_scene = ctx->rt0 != 0 && ctx->rt0 == s.scene_color;
 
                 if (!s.exposure_seen && ctx->rt0 != 0 && !into_scene && ctx->rt0_format == format::r11g11b10_float &&
-                    ctx->rt0_w * 4 + 4 >= s.render_w && ctx->rt0_w * 4 <= s.render_w + 4) {
+                    is_exposure_width(ctx->rt0_w, s.render_w)) {
                     s.exposure_seen = true;
                     s.exposure_target = ctx->rt0;
                 }
@@ -713,7 +723,7 @@ namespace edaa
         // the last thing drawn into the scene: time to build the HUD mask.
         void check_hud_mask(command_list* cmd_list, context_state* ctx)
         {
-            if (ctx == nullptr || !ctx->resolve_ps || !state().upscale_pending) {
+            if (ctx == nullptr || !ctx->resolve_ps || !(state().upscale_pending || state().fg_hud_pending)) {
                 return;
             }
 
@@ -721,7 +731,7 @@ namespace edaa
                 addon_state& s = state();
                 const std::lock_guard<std::recursive_mutex> lock(s.mutex);
 
-                if (!s.upscale_pending || s.hud_mask_done || !s.config.upscale_hud_mask) {
+                if (!(s.upscale_pending ? s.config.upscale_hud_mask : s.fg_hud_pending.load()) || s.hud_mask_done) {
                     return;
                 }
 
@@ -736,7 +746,7 @@ namespace edaa
         // resolve has completed, the HUD mask snapshot is taken again.
         void check_hud_snapshot(command_list* cmd_list, context_state* ctx, bool fullscreen)
         {
-            if (ctx == nullptr || !state().upscale_pending) {
+            if (ctx == nullptr || !(state().upscale_pending || state().fg_hud_pending)) {
                 return;
             }
 
@@ -745,7 +755,7 @@ namespace edaa
                 addon_state& s = state();
                 const std::lock_guard<std::recursive_mutex> lock(s.mutex);
 
-                if (!s.upscale_pending || s.hud_mask_done || !s.config.upscale_hud_mask) {
+                if (!(s.upscale_pending ? s.config.upscale_hud_mask : s.fg_hud_pending.load()) || s.hud_mask_done) {
                     return;
                 }
 
@@ -975,6 +985,37 @@ namespace edaa
 
         s.map_reason = !map ? "no" : (s.current.map_shader_drawn ? "yes (system map shaders)" : "yes (no sun shadow pass)");
 
+        // Diagnostics: status changes and stretches without an anti-aliasing
+        // resolve (e.g. carrier jump or hyperspace transitions), with the time in the log.
+        {
+            static int logged = 0;
+
+            if (s.resolve_ran) {
+                if (s.frames_without_resolve >= 3 && logged < 400) {
+                    ++logged;
+                    char msg[160];
+                    snprintf(msg, sizeof(msg), "EDAA status: anti-aliasing resolve back after %u frames without one", s.frames_without_resolve);
+                    reshade::log::message(reshade::log::level::info, msg);
+                }
+
+                s.frames_without_resolve = 0;
+            }
+            else if (++s.frames_without_resolve == 3 && logged < 400) {
+                ++logged;
+                reshade::log::message(reshade::log::level::info, "EDAA status: no anti-aliasing resolve for 3 frames (no scene found)");
+            }
+
+            s.resolve_ran = false;
+
+            if (s.motion_status != nullptr && std::strncmp(s.motion_status, s.logged_status, sizeof(s.logged_status) - 1) != 0 && logged < 400) {
+                ++logged;
+                std::strncpy(s.logged_status, s.motion_status, sizeof(s.logged_status) - 1);
+                char msg[256];
+                snprintf(msg, sizeof(msg), "EDAA status: %s", s.motion_status);
+                reshade::log::message(reshade::log::level::info, msg);
+            }
+        }
+
         if (s.screenshot_mode && --s.screenshot_hold <= 0) {
             s.screenshot_mode = false;
             s.history_reset = true;
@@ -990,6 +1031,7 @@ namespace edaa
         const bool upscaled = s.upscale_pending; // this frame ran for the upscaler
         s.upscale_pending = false;
         s.upscale_attempted = false;
+        s.fg_hud_pending = false;
         s.ldr_image = 0;
         s.hud_mask_done = false;
         s.hud_snapshot_stale = false;
