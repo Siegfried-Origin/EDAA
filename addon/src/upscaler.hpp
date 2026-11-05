@@ -23,6 +23,7 @@ namespace edaa
         float jitter_x = 0, jitter_y = 0; // pixels, the viewport offset of this frame
         bool reset = false; // camera cut: drop the history
         bool hdr = true; // false: tonemapped image (upscaling at the end of the frame)
+        int dlss_preset = 0; // DLSS only: NVSDK_NGX_DLSS_Hint_Render_Preset value, 0 = NVIDIA's default
     };
 
 

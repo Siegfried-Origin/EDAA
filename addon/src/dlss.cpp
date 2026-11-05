@@ -64,11 +64,35 @@ namespace edaa::dlss
         {
             uint32_t in_w = 0, in_h = 0, out_w = 0, out_h = 0;
             int mode = -1, flags = 0;
+            int preset = 0; // render preset hint (model), 0 = NVIDIA's default
 
             bool operator==(const feature_key&) const = default;
         };
 
         feature_key current;
+
+
+        // Render presets offered in the overlay (NVSDK_NGX_DLSS_Hint_Render_Preset);
+        // anything else falls back to NVIDIA's default.
+        int valid_preset(int preset)
+        {
+            return preset == NVSDK_NGX_DLSS_Hint_Render_Preset_J || preset == NVSDK_NGX_DLSS_Hint_Render_Preset_K ||
+                    preset == NVSDK_NGX_DLSS_Hint_Render_Preset_L || preset == NVSDK_NGX_DLSS_Hint_Render_Preset_M
+                ? preset
+                : NVSDK_NGX_DLSS_Hint_Render_Preset_Default;
+        }
+
+
+        const char* preset_name(int preset)
+        {
+            switch (preset) {
+            case NVSDK_NGX_DLSS_Hint_Render_Preset_J: return "J";
+            case NVSDK_NGX_DLSS_Hint_Render_Preset_K: return "K";
+            case NVSDK_NGX_DLSS_Hint_Render_Preset_L: return "L";
+            case NVSDK_NGX_DLSS_Hint_Render_Preset_M: return "M";
+            default: return "default";
+            }
+        }
 
         std::atomic<int> probed{ -1 }; // probe() result
         std::mutex status_mutex; // the overlay reads the status and info from its own thread
@@ -228,6 +252,22 @@ namespace edaa::dlss
 
             release_feature();
 
+            // Model (render preset) hint, read by NGX when the feature is created.
+            // Set for every quality mode so DLAA and the upscaling modes follow it;
+            // 0 (Default) lets the DLL pick (K for DLAA in the 310.x SDK).
+            const char* const preset_hints[] = {
+                NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA,
+                NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraQuality,
+                NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality,
+                NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced,
+                NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance,
+                NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance,
+            };
+
+            for (const char* hint : preset_hints) {
+                NVSDK_NGX_Parameter_SetUI(params, hint, static_cast<unsigned int>(key.preset));
+            }
+
             NVSDK_NGX_DLSS_Create_Params create = {};
             create.Feature.InWidth = key.in_w;
             create.Feature.InHeight = key.in_h;
@@ -245,9 +285,9 @@ namespace edaa::dlss
             }
 
             current = key;
-            char text[128];
-            snprintf(text, sizeof(text), "EDAA: DLSS feature created, %ux%u -> %ux%u, quality value %d", key.in_w, key.in_h, key.out_w,
-                key.out_h, key.mode);
+            char text[160];
+            snprintf(text, sizeof(text), "EDAA: DLSS feature created, %ux%u -> %ux%u, quality value %d, preset %s", key.in_w, key.in_h,
+                key.out_w, key.out_h, key.mode, preset_name(key.preset));
             reshade::log::message(reshade::log::level::info, text);
             return true;
         }
@@ -333,13 +373,13 @@ namespace edaa::dlss
             return false;
         }
 
-        const feature_key key = { in.width, in.height, in.width, in.height, NVSDK_NGX_PerfQuality_Value_DLAA, dlaa_flags };
+        const feature_key key = { in.width, in.height, in.width, in.height, NVSDK_NGX_PerfQuality_Value_DLAA, dlaa_flags, valid_preset(in.dlss_preset) };
 
         if (!create_feature(ctx, key) || !run(ctx, in)) {
             return false;
         }
 
-        set_status("running (DLAA)");
+        set_status(std::string("running (DLAA, preset ") + preset_name(key.preset) + ")");
         return true;
     }
 
@@ -395,7 +435,7 @@ namespace edaa::dlss
         }
 
         // Created for the actual render size (fixed by the game setting): the input must never exceed it.
-        const feature_key key = { in.width, in.height, in.output_width, in.output_height, value, upscale_flags };
+        const feature_key key = { in.width, in.height, in.output_width, in.output_height, value, upscale_flags, valid_preset(in.dlss_preset) };
 
         if (!create_feature(ctx, key) || !run(ctx, in)) {
             return false;

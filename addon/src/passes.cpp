@@ -756,6 +756,7 @@ namespace edaa
             u.height = in.render_h;
             // The viewport offset moves the image by +jitter pixels, like a projection jitter.
             const float sign = in.config.upscaler_jitter_flip ? -1.0f : 1.0f;
+            u.dlss_preset = in.config.dlss_preset;
             u.jitter_x = in.jitter_x * sign;
             u.jitter_y = in.jitter_y * sign;
             u.reset = gpu.upscaler_last != static_cast<int>(method) || in.camera_cut;
@@ -1383,6 +1384,7 @@ namespace edaa
                 u.output_width = display_w;
                 u.output_height = display_h;
                 u.hdr = false;
+                u.dlss_preset = config.dlss_preset;
                 const float sign = jitter_flip ? -1.0f : 1.0f;
                 u.jitter_x = upscale_in.jitter_x * sign;
                 u.jitter_y = upscale_in.jitter_y * sign;
