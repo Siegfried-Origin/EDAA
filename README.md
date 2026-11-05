@@ -7,6 +7,14 @@ HUD, bloom and tonemapping. NVIDIA DLAA (DLSS at native resolution, RTX
 GPUs) or Intel XeSS Native AA (any recent GPU, through a D3D12 bridge) can
 replace the EDAA TAA at the same point.
 
+**DLSS Frame Generation (RTX 40/50, experimental):** the final
+image is presented through a D3D12 swap chain driven by NVIDIA Streamline
+(DLSS-G 2x, Reflex low latency and frame limiter), with EDAA's depth and
+motion vectors and the cockpit HUD kept steady. Turn it on in the overlay
+(Alt+R, EDAA, "Frame Generation"), restart the game once, and use its frame
+limit (just below the refresh rate, e.g. 140 at 144 Hz) instead of any other
+limiter. Needs Windows hardware-accelerated GPU scheduling.
+
 * Website and download: https://siegfried-origin.github.io/EDAA/ (`docs/index.html`, GitHub Pages)
 * How it works, settings, diagnostics: [docs/addon.md](docs/addon.md)
 * The game's rendering, reverse-engineered: [docs/reverse-engineering.md](docs/reverse-engineering.md)
@@ -53,7 +61,8 @@ Game folder (Steam): `C:\Program Files (x86)\Steam\steamapps\common\Elite Danger
    **DirectX 10/11/12**. It installs `dxgi.dll` and `ReShade.ini`. Skip the
    effect packages (none are needed).
 3. Copy `EDAA.addon64` (with `nvngx_dlss.dll` for DLAA, `libxess.dll` for
-   XeSS) next to `dxgi.dll`
+   XeSS, the `sl.*.dll` files and `nvngx_dlssg.dll` for DLSS Frame
+   Generation) next to `dxgi.dll`
    (from the release zip, a package
    made with `tools\package.ps1`, or `build\Release` after building, see
    [docs/addon.md](docs/addon.md)).

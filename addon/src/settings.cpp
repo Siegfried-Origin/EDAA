@@ -58,6 +58,11 @@ namespace edaa
             EDAA_FIELD(upscale_mip_bias, boolean),
             EDAA_FIELD(upscale_sharpness, real),
             EDAA_FIELD(dlss_preset, integer),
+            EDAA_FIELD(fg_present_test, boolean),
+            EDAA_FIELD(fg_factory, integer),
+            EDAA_FIELD(fg_generate, boolean),
+            EDAA_FIELD(fg_hud_protect, boolean),
+            EDAA_FIELD(fg_fps_limit, integer),
         };
 #undef EDAA_FIELD
 

@@ -370,6 +370,15 @@ float ps_hud_mask(float4 pos : SV_Position) : SV_Target
 }
 
 
+// Frame generation: the motion vectors with the cockpit HUD standing still
+// (the HUD keeps its place on screen while the scene moves behind it).
+float2 ps_fg_motion(float4 pos : SV_Position) : SV_Target
+{
+    const int3 p = int3(pos.xy, 0);
+    return hud_mask_tex.Load(p) > 0.5 ? float2(0, 0) : motion_tex.Load(p);
+}
+
+
 // Copies the resolved image back into the game's scene target.
 float3 ps_copy(float4 pos : SV_Position) : SV_Target
 {

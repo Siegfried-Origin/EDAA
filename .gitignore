@@ -7,3 +7,4 @@ dist/
 __pycache__/
 installer/Output/
 build.bat
+third_party/streamline/

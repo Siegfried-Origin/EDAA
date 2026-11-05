@@ -73,6 +73,17 @@ Source: "{#DlssFile}"; DestDir: "{app}"; Flags: ignoreversion
 ; XeSS library (Intel Simplified Software License), delay-loaded by the add-on for XeSS.
 Source: "{#XessFile}"; DestDir: "{app}"; Flags: ignoreversion
 #endif
+#if FileExists(AddBackslash(SourcePath) + "..\build\Release\sl.interposer.dll")
+; NVIDIA Streamline (MIT) and the DLSS-G library (NVIDIA RTX SDKs license), loaded by the add-on for DLSS Frame Generation.
+Source: "..\build\Release\sl.interposer.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\build\Release\sl.common.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\build\Release\sl.dlss_g.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\build\Release\sl.reflex.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\build\Release\sl.pcl.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\build\Release\nvngx_dlssg.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\third_party\streamline\license.txt"; DestDir: "{autopf}\EDAA\licenses"; DestName: "NVIDIA-Streamline-LICENSE.txt"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\third_party\streamline\external\ngx-sdk\license.txt"; DestDir: "{autopf}\EDAA\licenses"; DestName: "NVIDIA-NGX-SDK-LICENSE.txt"; Flags: ignoreversion skipifsourcedoesntexist
+#endif
 Source: "..\README.md"; DestDir: "{autopf}\EDAA"; Flags: ignoreversion
 Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{autopf}\EDAA"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{autopf}\EDAA"; DestName: "LICENSE.txt"; Flags: ignoreversion

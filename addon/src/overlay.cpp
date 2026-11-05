@@ -6,6 +6,7 @@
 // camera decoding and diagnostics. Every change is saved to ReShade.ini.
 
 #include "dlss.hpp"
+#include "fg.hpp"
 #include "xess.hpp"
 #include "state.hpp"
 
@@ -461,6 +462,71 @@ namespace edaa
     }
 
 
+    namespace
+    {
+        // DLSS Frame Generation (fg_present.cpp): on/off, frame limit, status.
+        void draw_frame_generation(addon_state& s, change_tracker& edit)
+        {
+            const fg::status st = fg::get_status();
+
+            if (edit(ImGui::Checkbox("DLSS Frame Generation (RTX 40/50, 2x)", &s.config.fg_generate)) && s.config.fg_generate) {
+                s.config.fg_present_test = true; // the D3D12 swap chain it needs
+            }
+
+            edit(ImGui::Checkbox("Keep the cockpit HUD steady (no smearing in generated frames)", &s.config.fg_hud_protect));
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+            edit(ImGui::SliderInt("Frame limit (displayed FPS, 0 = off)", &s.config.fg_fps_limit, 0, 360));
+            ImGui::TextDisabled("Use this limit only (no external limiter): set it just below the refresh rate, e.g. 140 at 144 Hz.");
+
+            if (s.config.fg_generate && !st.streamline) {
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), st.error != nullptr ? "Stopped: %s" : "Restart the game to start frame generation.",
+                    st.error != nullptr ? st.error : "");
+                return;
+            }
+
+            if (!st.d3d12_path) {
+                ImGui::TextDisabled("Status: off");
+                return;
+            }
+
+            if (!s.config.fg_generate) {
+                ImGui::Text("Status: off (%.0f FPS)", st.real_fps);
+
+                if (s.config.fg_present_test) {
+                    if (ImGui::Button("Present through D3D11 again at the next game start")) {
+                        s.config.fg_present_test = false;
+                        edit(true);
+                    }
+                }
+                return;
+            }
+
+            if (st.generating) {
+                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "Status: running, %.0f real -> %.0f FPS displayed", st.real_fps, st.shown_fps);
+            }
+            else if (st.background) {
+                ImGui::Text("Status: paused (game in the background), %.0f FPS", st.real_fps);
+            }
+            else if (st.waiting) {
+                ImGui::Text("Status: paused (menu, map or loading), %.0f FPS", st.real_fps);
+            }
+            else {
+                ImGui::Text("Status: starting, %.0f FPS", st.real_fps);
+            }
+
+            ImGui::Text("Reflex low latency: %s", st.reflex ? "on" : "off");
+
+            if (s.config.fg_hud_protect && st.generating) {
+                ImGui::Text("HUD protection: %s", st.hud_protected ? "active" : "no HUD found this frame");
+            }
+
+            if (st.dlssg_status != 0) {
+                ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "DLSS-G reports problem flags 0x%X (see ReShade.log)", st.dlssg_status);
+            }
+        }
+    }
+
+
     void draw_overlay(reshade::api::effect_runtime*)
     {
         addon_state& s = state();
@@ -471,6 +537,10 @@ namespace edaa
 
         change_tracker edit;
         draw_main(s, edit);
+
+        if (ImGui::CollapsingHeader("Frame Generation", ImGuiTreeNodeFlags_DefaultOpen)) {
+            draw_frame_generation(s, edit);
+        }
 
         if (ImGui::CollapsingHeader("Advanced settings")) {
             draw_advanced(s, edit);
