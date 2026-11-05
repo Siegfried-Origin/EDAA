@@ -57,8 +57,5 @@ switched off and on without need, because rebuilding it stutters.
 - DLSS-G presets cannot be set through the API in Streamline 2.14.16 / DLSS SDK 310.9.16.
 - Dynamic Multi Frame Generation is RTX 50 only.
 - Tested on one system only (RTX 4070 Ti, 1440p, about 68 real and 137 displayed FPS).
-
-## Known issue
-
-Turning `fg_present_test` off while the game runs, for example with "Reset to defaults", can
-freeze the picture: the child window keeps covering the game, but its swap chain stops.
+- `fg_present_test` is read at game start. Turning it off while the game runs, for example with
+  "Reset to defaults", stops DLSS-G at once and returns to D3D11 at the next start.

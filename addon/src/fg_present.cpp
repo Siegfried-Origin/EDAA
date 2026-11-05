@@ -1252,7 +1252,10 @@ namespace edaa
                 p.hud_protected = hud_done;
             }
 
-            if (!enabled || p.failed) {
+            // fg_present_test is read at game start: once our swap chain runs, its child
+            // window covers the game, so it keeps presenting until the game exits (else
+            // the picture freezes on the last frame). present_frame stops DLSS-G if needed.
+            if ((!enabled && p.device12 == nullptr) || p.failed) {
                 inputs_wanted = false;
                 return;
             }
