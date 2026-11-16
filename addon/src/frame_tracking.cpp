@@ -602,6 +602,15 @@ namespace edaa
         }
 
 
+        // Width of the game's exposure downsample (R11G11B10): a quarter of the
+        // render width, but never below 320 pixels (seen at 960x540: 320x180).
+        bool is_exposure_width(uint32_t w, uint32_t render_w)
+        {
+            const uint32_t expected = std::max(render_w / 4, 320u);
+            return w + 1 >= expected && w <= expected + 1;
+        }
+
+
         // TAA resolve point. Live frame order (docs/reverse-engineering.md
         // section 3): ... sky, planets, world transparents -> exposure downsample
         // of the HDR scene (R11G11B10 at 1/4 size) -> last group of draws into
@@ -632,7 +641,7 @@ namespace edaa
                 }
 
                 if (ctx->rt0 != 0 && ctx->rt0 != s.scene_color && ctx->rt0_format == format::r11g11b10_float &&
-                    ctx->rt0_w * 4 + 4 >= s.render_w && ctx->rt0_w * 4 <= s.render_w + 4) {
+                    is_exposure_width(ctx->rt0_w, s.render_w)) {
                     s.current.exposure_downsample = true;
                 }
 
@@ -645,7 +654,7 @@ namespace edaa
                 const bool into_scene = ctx->rt0 != 0 && ctx->rt0 == s.scene_color;
 
                 if (!s.exposure_seen && ctx->rt0 != 0 && !into_scene && ctx->rt0_format == format::r11g11b10_float &&
-                    ctx->rt0_w * 4 + 4 >= s.render_w && ctx->rt0_w * 4 <= s.render_w + 4) {
+                    is_exposure_width(ctx->rt0_w, s.render_w)) {
                     s.exposure_seen = true;
                     s.exposure_target = ctx->rt0;
                 }
