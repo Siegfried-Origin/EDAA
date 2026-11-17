@@ -20,6 +20,14 @@ jobs:
           # ReShade, ImGui, the DLSS and XeSS SDKs (shallow, at the pinned commits).
           submodules: true
 
+      - name: Get Streamline SDK
+        shell: pwsh
+        run: |
+          # DLSS Frame Generation and Reflex (MIT; nvngx_dlssg.dll under the NGX SDK license).
+          $url = "https://github.com/NVIDIA-RTX/Streamline/releases/download/v2.14.16/streamline-sdk-v2.14.16.zip"
+          Invoke-WebRequest -Uri $url -OutFile sl.zip
+          Expand-Archive sl.zip -DestinationPath third_party/streamline -Force
+
       - name: Version from tag
         id: version
         shell: pwsh
@@ -57,6 +65,12 @@ jobs:
           Copy-Item third_party\imgui\LICENSE.txt "$zip\licenses\ImGui-LICENSE.txt"
           Copy-Item third_party\xess\LICENSE.txt "$zip\licenses\Intel-XeSS-LICENSE.txt"
           Copy-Item third_party\xess\third-party-programs.txt "$zip\licenses\Intel-XeSS-third-party-programs.txt"
+          # Streamline (frame generation), when the build has it.
+          foreach ($f in "sl.interposer.dll", "sl.common.dll", "sl.dlss_g.dll", "sl.reflex.dll", "sl.pcl.dll", "nvngx_dlssg.dll") {
+            if (Test-Path "build\Release\$f") { Copy-Item "build\Release\$f" $zip }
+          }
+          if (Test-Path third_party\streamline\license.txt) { Copy-Item third_party\streamline\license.txt "$zip\licenses\NVIDIA-Streamline-LICENSE.txt" }
+          if (Test-Path third_party\streamline\external\ngx-sdk\license.txt) { Copy-Item third_party\streamline\external\ngx-sdk\license.txt "$zip\licenses\NVIDIA-NGX-SDK-LICENSE.txt" }
           Compress-Archive -Path "$zip\*" -DestinationPath "installer\Output\EDAA-${{ steps.version.outputs.version }}.zip"
 
       - name: Publish release
