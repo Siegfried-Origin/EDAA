@@ -96,6 +96,19 @@ Plan:
    walking NPCs with the TAA. **Decision (2026-10-11): step 3 is not
    needed for now**; the analysis stays as a developer diagnostic. Revisit
    if ghosting shows on ships passing close.
+
+   **Re-check (2026-11-10, phase 5)**, with DLSS upscaling 0.65/0.85 and
+   DLSS-G: developer builds now log one line per 600 analysed frames
+   (`EDAA objects: scene X | … mean, p95, p99, max px`). Hangar and
+   undocking: mean 0.7-2.5 px, p95 2.5-8.6 px. Supercruise and the approach
+   to a station's mail slot (scene B, 370-1090 moving records on screen):
+   mean up to 47 px, p95 up to 146 px, max up to 93,705 px. Those values are
+   not plausible for a slowly rotating station; most likely the nearest-record
+   match picks the wrong one of hundreds of identical station parts. In game
+   (in testing): no visible trails on other ships or the station. **Decision: no
+   velocity pass.** If it is ever revisited, first count only unambiguous
+   matches (second-nearest candidate much further away) before trusting the
+   numbers.
 3. **Velocity pass**: re-issue the matched instanced draws of the main
    camera into the motion texture with a velocity vertex/pixel shader that
    transforms each vertex with the current and the previous instance

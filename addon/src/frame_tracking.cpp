@@ -18,14 +18,21 @@
 #include "profile.hpp"
 #include "events.hpp"
 #include "state.hpp"
+#include "exposure.hpp"
 
 #include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#if EDAA_DEVELOPER
+#include <Windows.h>
+#include <d3dcompiler.h>
+#endif
 
 using namespace reshade::api;
 
@@ -53,6 +60,18 @@ namespace edaa
             bool blend_on = false, depth_write = false;
             int depth_func = -1; // compare_op of the bound depth state, -1 = depth test off
             uint32_t trace_lines = 0;
+            bool ds_bound = false; // a depth-stencil view is bound (frame trace)
+            // Pixel shader textures (slots 0-7) and their sizes, kept only while tracing.
+            uint64_t ps_srv[8] = {};
+            uint64_t ps_pipeline = 0; // bound pixel shader pipeline
+            uint8_t panel_srv = 0; // hud_learn: slots holding a HUD panel texture
+            uint32_t ps_srv_w[8] = {}, ps_srv_h[8] = {};
+            // Vertex shader and its textures (slots 0-3, kept only while tracing).
+            uint64_t vs_hash = 0, vs_pipeline = 0;
+            uint64_t vs_srv[4] = {};
+            uint32_t vs_srv_w[4] = {}, vs_srv_h[4] = {}, vs_srv_fmt[4] = {};
+            // Elite's exposure (exposure.hpp): vertex shader texture 0 and pixel shader cb2.
+            uint64_t vs_srv0 = 0, ps_cb2 = 0, ps_cb2_offset = 0;
         };
 
         // Depth-stencil state objects that pass the geometry test, and pixel
@@ -64,6 +83,13 @@ namespace edaa
         std::unordered_set<uint64_t> map_shaders;
         // For the frame trace: pixel shader hashes, blend and depth-write states.
         std::unordered_map<uint64_t, uint64_t> pixel_hashes;
+        std::unordered_map<uint64_t, uint64_t> vertex_hashes;
+#if EDAA_DEVELOPER
+        // Developer build: vertex shader bytecode, disassembled into the frame trace
+        // for draws whose vertex shader reads textures (e.g. the tonemap's exposure).
+        std::unordered_map<uint64_t, std::vector<uint8_t>> vertex_code;
+        std::unordered_set<uint64_t> vertex_logged; // per trace
+#endif
         std::unordered_map<uint64_t, bool> blend_states, depth_writes;
         std::unordered_map<uint64_t, int> depth_funcs;
 
@@ -182,6 +208,21 @@ namespace edaa
                     continue;
                 }
 
+                if (subobjects[i].type == pipeline_subobject_type::vertex_shader && subobjects[i].data != nullptr) {
+                    const auto& desc = *static_cast<const shader_desc*>(subobjects[i].data);
+                    const uint64_t hash = desc.code != nullptr ? shader_hash(desc.code, desc.code_size) : 0;
+
+                    const std::lock_guard<std::mutex> lock(pipelines_mutex);
+                    vertex_hashes[pipeline.handle] = hash;
+#if EDAA_DEVELOPER
+                    if (desc.code != nullptr) {
+                        const auto* const code = static_cast<const uint8_t*>(desc.code);
+                        vertex_code[pipeline.handle].assign(code, code + desc.code_size);
+                    }
+#endif
+                    continue;
+                }
+
                 if (subobjects[i].type == pipeline_subobject_type::pixel_shader && subobjects[i].data != nullptr) {
                     const auto& desc = *static_cast<const shader_desc*>(subobjects[i].data);
                     const uint64_t hash = desc.code != nullptr ? shader_hash(desc.code, desc.code_size) : 0;
@@ -258,8 +299,9 @@ namespace edaa
             const bool pixel = (stages & pipeline_stage::pixel_shader) != 0;
             const bool blend = (stages & pipeline_stage::output_merger) != 0;
             const bool compute = (stages & pipeline_stage::compute_shader) != 0;
+            const bool vertex = (stages & pipeline_stage::vertex_shader) != 0;
 
-            if (!depth && !pixel && !blend && !compute) {
+            if (!depth && !pixel && !blend && !compute && !vertex) {
                 return;
             }
 
@@ -285,12 +327,19 @@ namespace edaa
                 ctx->blend_on = it != blend_states.end() && it->second;
             }
 
+            if (vertex) {
+                ctx->vs_pipeline = pipeline.handle;
+                const auto h = vertex_hashes.find(pipeline.handle);
+                ctx->vs_hash = h != vertex_hashes.end() ? h->second : 0;
+            }
+
             if (compute) {
                 const auto h = compute_hashes.find(pipeline.handle);
                 ctx->cs_hash = h != compute_hashes.end() ? h->second : 0;
             }
 
             if (pixel) {
+                ctx->ps_pipeline = pipeline.handle;
                 ctx->resolve_ps = resolve_shaders.count(pipeline.handle) != 0;
                 const auto h = pixel_hashes.find(pipeline.handle);
                 ctx->ps_hash = h != pixel_hashes.end() ? h->second : 0;
@@ -377,7 +426,8 @@ namespace edaa
                 const std::lock_guard<std::recursive_mutex> lock(s.mutex);
                 n += snprintf(msg + n, sizeof(msg) - n, " %s=%llx %ux%u fmt%u%s", label, static_cast<unsigned long long>(r.handle),
                     d.texture.width, d.texture.height, static_cast<uint32_t>(d.texture.format),
-                    r.handle == s.scene_color ? " [SCENE COLOR]" : (r.handle == s.scene_depth ? " [SCENE DEPTH]" : ""));
+                    r.handle == s.scene_color ? " [SCENE COLOR]" : (r.handle == s.scene_depth ? " [SCENE DEPTH]" :
+                    (d.texture.width == s.back_buffer_w && d.texture.height == s.back_buffer_h ? " [DISPLAY SIZE]" : "")));
             };
 
             for (uint32_t i = 0; i < count && i < 8; ++i) {
@@ -389,6 +439,60 @@ namespace edaa
         }
 
 
+#if EDAA_DEVELOPER
+        // Frame trace: the disassembly of a vertex shader that reads textures, once per trace.
+        void log_vertex_disassembly(uint64_t pipeline_handle, uint64_t hash)
+        {
+            std::vector<uint8_t> code;
+            {
+                const std::lock_guard<std::mutex> lock(pipelines_mutex);
+
+                if (vertex_logged.size() >= 16 || !vertex_logged.insert(hash).second) {
+                    return;
+                }
+
+                const auto it = vertex_code.find(pipeline_handle);
+
+                if (it == vertex_code.end()) {
+                    return;
+                }
+
+                code = it->second;
+            }
+
+            using disassemble_fn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, UINT, LPCSTR, ID3DBlob**);
+            static const auto disassemble = [] {
+                HMODULE module = GetModuleHandleW(L"d3dcompiler_47.dll");
+                module = module != nullptr ? module : LoadLibraryW(L"d3dcompiler_47.dll");
+                return module != nullptr ? reinterpret_cast<disassemble_fn>(GetProcAddress(module, "D3DDisassemble")) : nullptr;
+            }();
+            ID3DBlob* text = nullptr;
+
+            if (disassemble == nullptr || FAILED(disassemble(code.data(), code.size(), 0, nullptr, &text)) || text == nullptr) {
+                reshade::log::message(reshade::log::level::warning, "EDAA trace: vertex shader disassembly not available");
+                return;
+            }
+
+            const std::string all(static_cast<const char*>(text->GetBufferPointer()), text->GetBufferSize());
+            text->Release();
+            char head[64];
+            snprintf(head, sizeof(head), "EDAA vs %016llx:", static_cast<unsigned long long>(hash));
+            size_t start = 0;
+
+            while (start < all.size()) {
+                size_t end = all.find('\n', start);
+                end = end == std::string::npos ? all.size() : end;
+                const std::string line = all.substr(start, end - start);
+
+                if (line.find_first_not_of(" \r\t/", 0) != std::string::npos && line[0] != '\0') {
+                    reshade::log::message(reshade::log::level::info, (std::string(head) + " " + line).c_str());
+                }
+
+                start = end + 1;
+            }
+        }
+#endif
+
         void trace_draw(context_state* ctx, const char* kind, uint32_t count, uint32_t instances)
         {
             if (!tracing(ctx)) {
@@ -399,7 +503,7 @@ namespace edaa
             {
                 const std::lock_guard<std::recursive_mutex> lock(s.mutex);
 
-                if (!ctx->scene_targets && (ctx->rt0 == 0 || ctx->rt0 != s.scene_color)) {
+                if (!s.resolved_this_frame && !ctx->scene_targets && (ctx->rt0 == 0 || ctx->rt0 != s.scene_color)) {
                     return;
                 }
             }
@@ -416,12 +520,143 @@ namespace edaa
             // zfunc: compare_op (-1 off, 1 less, 2 equal, 3 less_equal, 4 greater, 6 greater_equal, 7 always);
             // vpfull: viewport is the full render size.
             const bool vp_full = ctx->game_viewport.width == static_cast<float>(render_w) && ctx->game_viewport.height == static_cast<float>(render_h);
-            char msg[320];
-            snprintf(msg, sizeof(msg), "EDAA trace: %s %u x%u ps=%016llx ztest=%d zfunc=%d zwrite=%d blend=%d scene=%d hdr=%d vpfull=%d jittered=%d %s",
-                kind, count, instances, static_cast<unsigned long long>(ctx->ps_hash), ctx->depth_test_ok ? 1 : 0, ctx->depth_func,
+            char msg[720];
+            snprintf(msg, sizeof(msg), "EDAA trace: %s %u x%u rt=%llx %ux%u fmt%u display=%d ds=%d ps=%016llx ztest=%d zfunc=%d zwrite=%d blend=%d scene=%d hdr=%d vpfull=%d jittered=%d %s",
+                kind, count, instances, static_cast<unsigned long long>(ctx->rt0), ctx->rt0_w, ctx->rt0_h, static_cast<uint32_t>(ctx->rt0_format),
+                ctx->rt0 != 0 && ctx->rt0_w == s.back_buffer_w && ctx->rt0_h == s.back_buffer_h ? 1 : 0, ctx->ds_bound ? 1 : 0,
+                static_cast<unsigned long long>(ctx->ps_hash), ctx->depth_test_ok ? 1 : 0, ctx->depth_func,
                 ctx->depth_write ? 1 : 0, ctx->blend_on ? 1 : 0, ctx->scene_targets ? 1 : 0, ctx->rt0 == s.scene_color ? 1 : 0,
                 vp_full ? 1 : 0, (ctx->jitter_applied && jitter) ? 1 : 0, resolved ? "(after resolve)" : "");
+            int m = static_cast<int>(strlen(msg));
+
+            for (int i = 0; i < 8 && m > 0 && m < static_cast<int>(sizeof(msg)) - 48; ++i) {
+                if (ctx->ps_srv[i] != 0) {
+                    m += snprintf(msg + m, sizeof(msg) - m, " t%d=%llx %ux%u", i, static_cast<unsigned long long>(ctx->ps_srv[i]), ctx->ps_srv_w[i], ctx->ps_srv_h[i]);
+                }
+            }
+
+            bool vs_reads = false;
+
+            if (m > 0 && m < static_cast<int>(sizeof(msg)) - 32) {
+                m += snprintf(msg + m, sizeof(msg) - m, " vs=%016llx", static_cast<unsigned long long>(ctx->vs_hash));
+            }
+
+            for (int i = 0; i < 4 && m > 0 && m < static_cast<int>(sizeof(msg)) - 48; ++i) {
+                if (ctx->vs_srv[i] != 0) {
+                    vs_reads = true;
+                    m += snprintf(msg + m, sizeof(msg) - m, " vt%d=%llx %ux%u fmt%u", i, static_cast<unsigned long long>(ctx->vs_srv[i]), ctx->vs_srv_w[i],
+                        ctx->vs_srv_h[i], ctx->vs_srv_fmt[i]);
+                }
+            }
+
             reshade::log::message(reshade::log::level::info, msg);
+
+#if EDAA_DEVELOPER
+            if (vs_reads) {
+                log_vertex_disassembly(ctx->vs_pipeline, ctx->vs_hash);
+            }
+#else
+            (void)vs_reads;
+#endif
+        }
+
+
+        // Frame trace: which textures the pixel shader reads (finds the HUD panel draws).
+        void on_push_descriptors_trace(command_list* cmd_list, shader_stage stages, pipeline_layout, uint32_t, const descriptor_table_update& update)
+        {
+            addon_state& s = state();
+
+            // Elite's exposure (exposure.hpp): what the tonemap draw will read.
+            const bool vs_texture0 = update.type == descriptor_type::shader_resource_view && (stages & shader_stage::vertex) != 0 && update.binding == 0 &&
+                update.count > 0;
+            const bool ps_cb2 = update.type == descriptor_type::constant_buffer && (stages & shader_stage::pixel) != 0 && update.binding <= 2 &&
+                update.binding + update.count > 2;
+
+            if (vs_texture0 || ps_cb2) {
+                if (auto* c = context_of(cmd_list)) {
+                    if (vs_texture0) {
+                        const resource_view view = static_cast<const resource_view*>(update.descriptors)[0];
+                        c->vs_srv0 = view.handle != 0 ? cmd_list->get_device()->get_resource_from_view(view).handle : 0;
+                    }
+                    else {
+                        const buffer_range& range = static_cast<const buffer_range*>(update.descriptors)[2 - update.binding];
+                        c->ps_cb2 = range.buffer.handle;
+                        c->ps_cb2_offset = range.offset;
+                    }
+                }
+            }
+
+            const bool dumping = s.dumping.load(std::memory_order_relaxed), learning = s.hud_learning.load(std::memory_order_relaxed);
+
+            if ((!dumping && !learning) || update.type != descriptor_type::shader_resource_view) {
+                return;
+            }
+
+            auto* ctx = context_of(cmd_list);
+
+            if (ctx == nullptr) {
+                return;
+            }
+
+            device* const dev = cmd_list->get_device();
+            const auto* const views = static_cast<const resource_view*>(update.descriptors);
+
+            // Vertex shader textures (frame trace only).
+            if (dumping && (stages & shader_stage::vertex) != 0) {
+                for (uint32_t i = 0; i < update.count && update.binding + i < 4; ++i) {
+                    const uint32_t slot = update.binding + i;
+                    ctx->vs_srv[slot] = 0;
+                    ctx->vs_srv_w[slot] = ctx->vs_srv_h[slot] = ctx->vs_srv_fmt[slot] = 0;
+
+                    if (views[i].handle != 0) {
+                        const resource r = dev->get_resource_from_view(views[i]);
+                        const resource_desc d = dev->get_resource_desc(r);
+                        ctx->vs_srv[slot] = r.handle;
+                        ctx->vs_srv_w[slot] = d.texture.width;
+                        ctx->vs_srv_h[slot] = d.texture.height;
+                        ctx->vs_srv_fmt[slot] = static_cast<uint32_t>(d.texture.format);
+                    }
+                }
+            }
+
+            if ((stages & shader_stage::pixel) == 0) {
+                return;
+            }
+
+            for (uint32_t i = 0; i < update.count; ++i) {
+                const uint32_t slot = update.binding + i;
+
+                if (slot >= 8) {
+                    break;
+                }
+
+                ctx->ps_srv[slot] = 0;
+                ctx->ps_srv_w[slot] = ctx->ps_srv_h[slot] = 0;
+                ctx->panel_srv &= static_cast<uint8_t>(~(1u << slot));
+
+                if (views[i].handle != 0) {
+                    const resource r = dev->get_resource_from_view(views[i]);
+
+                    if (learning) {
+                        const std::lock_guard<std::recursive_mutex> lock(s.mutex);
+
+                        for (int k = 0; k < s.hud_panel_count; ++k) {
+                            if (s.hud_panels[k] == r.handle) {
+                                ctx->panel_srv |= static_cast<uint8_t>(1u << slot);
+                            }
+                        }
+                    }
+
+                    if (!dumping) {
+                        continue;
+                    }
+
+                    const resource_desc d = dev->get_resource_desc(r);
+                    ctx->ps_srv[slot] = r.handle;
+                    ctx->ps_srv_w[slot] = d.texture.width;
+                    ctx->ps_srv_h[slot] = d.texture.height;
+                }
+            }
         }
 
 
@@ -435,6 +670,7 @@ namespace edaa
             }
 
             ctx->scene_targets = false;
+            ctx->ds_bound = dsv.handle != 0;
             device* const dev = cmd_list->get_device();
             trace_bind(ctx, dev, count, rtvs, dsv);
 
@@ -453,6 +689,28 @@ namespace edaa
                 ctx->rt0_h = d.texture.height;
                 ctx->rt0_format = d.texture.format;
                 break;
+            }
+
+            // hud_learn: the cockpit HUD panels are rendered offscreen into colour
+            // targets with a D24S8 depth buffer, then blended into the scene.
+            if (dsv.handle != 0 && ctx->rt0 != 0 && state().hud_learning.load(std::memory_order_relaxed) &&
+                (ctx->rt0_format == format::r8g8b8a8_typeless || ctx->rt0_format == format::r8g8b8a8_unorm ||
+                 ctx->rt0_format == format::r8g8b8a8_unorm_srgb)) {
+                const format df = dev->get_resource_desc(dev->get_resource_from_view(dsv)).texture.format;
+
+                if (df == format::r24_g8_typeless || df == format::d24_unorm_s8_uint) {
+                    addon_state& s = state();
+                    const std::lock_guard<std::recursive_mutex> lock(s.mutex);
+                    bool known = ctx->rt0 == s.scene_color;
+
+                    for (int k = 0; k < s.hud_panel_count; ++k) {
+                        known |= s.hud_panels[k] == ctx->rt0;
+                    }
+
+                    if (!known && s.hud_panel_count < 8) {
+                        s.hud_panels[s.hud_panel_count++] = ctx->rt0;
+                    }
+                }
             }
 
             if (dsv.handle == 0) {
@@ -623,6 +881,8 @@ namespace edaa
         void check_resolve_point(command_list* cmd_list, context_state* ctx, bool fullscreen, bool single_quad, bool& want, float& jx, float& jy)
         {
             const char* point = nullptr;
+            bool reactive_snapshot = false;
+            uint64_t scene_color = 0;
             {
                 addon_state& s = state();
                 const std::lock_guard<std::recursive_mutex> lock(s.mutex);
@@ -653,27 +913,66 @@ namespace edaa
 
                 const bool into_scene = ctx->rt0 != 0 && ctx->rt0 == s.scene_color;
 
+                // Reactive mask: forward transparents (particles, glass, glows) are
+                // blended, write no depth and test the scene depth with the reverse-Z
+                // geometry test (GREATER / GREATER_EQUAL). The deferred light volumes
+                // test LESS_EQUAL on back faces, the sun light and glows test nothing:
+                // not counted. The scene is saved right before the first transparent
+                // (pipeline state only, no shader hashes).
+                const bool forward_test = ctx->depth_func == static_cast<int>(compare_op::greater) ||
+                    ctx->depth_func == static_cast<int>(compare_op::greater_equal);
+
+                if (into_scene && s.config.dlss_reactive_mask && ctx->scene_targets && ctx->blend_on && !ctx->depth_write && forward_test &&
+                    !fullscreen && !single_quad) {
+                    s.reactive_gate = true;
+                    ++s.reactive_draws;
+
+                    if (!s.reactive_snapped) {
+                        s.reactive_snapped = true;
+                        ++s.reactive_snapshots;
+                        reactive_snapshot = true;
+                        scene_color = s.scene_color;
+                    }
+                }
+
                 if (!s.exposure_seen && ctx->rt0 != 0 && !into_scene && ctx->rt0_format == format::r11g11b10_float &&
                     is_exposure_width(ctx->rt0_w, s.render_w)) {
                     s.exposure_seen = true;
                     s.exposure_target = ctx->rt0;
                 }
 
-                if (s.config.taa_before_hud && s.exposure_seen && into_scene) {
+                // Option off but no bloom downsample drawn last frame (bloom shader
+                // replaced, e.g. EDHM, or another variant at a low bloom setting):
+                // the bloom point would never come, so no TAA, DLSS or frame
+                // generation at all. Resolve before the HUD instead.
+                const bool no_bloom = !s.config.taa_before_hud && !s.last.bloom_shader;
+                const bool before_hud = s.config.taa_before_hud || no_bloom;
+
+                if (before_hud && s.exposure_seen && into_scene) {
                     point = "before the HUD pass (after exposure downsample)";
                 }
-                else if (s.config.taa_before_hud && ctx->hud_ps) {
+                else if (before_hud && ctx->hud_ps) {
                     point = "before the HUD pass (HUD shader)";
                 }
 
                 // The world is complete once the exposure is measured. Without a HUD
                 // draw into the scene (on foot) and without bloom (graphics option
                 // off), the next pass elsewhere is the last chance before tonemapping.
-                else if (s.config.taa_before_hud && s.exposure_seen && ctx->rt0 != 0 && ctx->rt0 != s.exposure_target) {
+                else if (before_hud && s.exposure_seen && ctx->rt0 != 0 && ctx->rt0 != s.exposure_target) {
                     point = "after the exposure downsample (no HUD draw into the scene)";
                 }
                 else if (ctx->resolve_ps) {
                     point = "before bloom (HUD included)";
+                }
+
+                if (point != nullptr && no_bloom && !ctx->resolve_ps) {
+                    point = "before the HUD pass (no bloom pass found)";
+
+                    if (!s.bloom_fallback_logged) {
+                        s.bloom_fallback_logged = true;
+                        reshade::log::message(reshade::log::level::warning,
+                            "EDAA: no bloom pass found, resolving before the HUD although that option is off");
+                    }
                 }
 
                 if (point != nullptr) {
@@ -685,6 +984,9 @@ namespace edaa
 
             if (point != nullptr) {
                 run_resolve(cmd_list);
+            }
+            else if (reactive_snapshot) {
+                run_reactive_snapshot(cmd_list, scene_color);
             }
         }
 
@@ -720,9 +1022,12 @@ namespace edaa
 
         // Upscaling: the first bloom downsample draw follows the cockpit HUD,
         // the last thing drawn into the scene: time to build the HUD mask.
+        // Frame generation without a bloom pass (none drawn last frame): the first
+        // draw into a display-size target after the resolve; the scene holds the
+        // HUD by then. Upscaling builds its mask in run_upscale.
         void check_hud_mask(command_list* cmd_list, context_state* ctx)
         {
-            if (ctx == nullptr || !ctx->resolve_ps || !state().upscale_pending) {
+            if (ctx == nullptr || !(state().upscale_pending || state().fg_hud_pending)) {
                 return;
             }
 
@@ -730,7 +1035,14 @@ namespace edaa
                 addon_state& s = state();
                 const std::lock_guard<std::recursive_mutex> lock(s.mutex);
 
-                if (!s.upscale_pending || s.hud_mask_done || !s.config.upscale_hud_mask) {
+                if (!(s.upscale_pending ? s.config.upscale_hud_mask : s.fg_hud_pending.load()) || s.hud_mask_done) {
+                    return;
+                }
+
+                const bool late = !ctx->resolve_ps && !s.upscale_pending && !s.last.bloom_shader && s.resolved_this_frame &&
+                    ctx->rt0 != 0 && ctx->rt0 != s.scene_color && ctx->rt0_w == s.back_buffer_w && ctx->rt0_h == s.back_buffer_h;
+
+                if (!ctx->resolve_ps && !late) {
                     return;
                 }
 
@@ -745,7 +1057,7 @@ namespace edaa
         // resolve has completed, the HUD mask snapshot is taken again.
         void check_hud_snapshot(command_list* cmd_list, context_state* ctx, bool fullscreen)
         {
-            if (ctx == nullptr || !state().upscale_pending) {
+            if (ctx == nullptr || !(state().upscale_pending || state().fg_hud_pending)) {
                 return;
             }
 
@@ -754,7 +1066,7 @@ namespace edaa
                 addon_state& s = state();
                 const std::lock_guard<std::recursive_mutex> lock(s.mutex);
 
-                if (!s.upscale_pending || s.hud_mask_done || !s.config.upscale_hud_mask) {
+                if (!(s.upscale_pending ? s.config.upscale_hud_mask : s.fg_hud_pending.load()) || s.hud_mask_done) {
                     return;
                 }
 
@@ -829,6 +1141,39 @@ namespace edaa
         }
 
 
+        // hud_learn: a draw into the HDR scene that reads a HUD panel texture is the
+        // cockpit HUD composite; its pixel shader becomes the HUD shader.
+        void learn_hud_shader(context_state* ctx)
+        {
+            if (ctx->panel_srv == 0 || ctx->hud_ps || ctx->ps_pipeline == 0 || !state().hud_learning.load(std::memory_order_relaxed)) {
+                return;
+            }
+
+            {
+                addon_state& s = state();
+                const std::lock_guard<std::recursive_mutex> lock(s.mutex);
+
+                if (ctx->rt0 == 0 || ctx->rt0 != s.scene_color) {
+                    return;
+                }
+            }
+
+            bool added;
+            {
+                const std::lock_guard<std::mutex> lock(pipelines_mutex);
+                added = hud_shaders.insert(ctx->ps_pipeline).second;
+            }
+
+            ctx->hud_ps = true;
+
+            if (added) {
+                char msg[128];
+                snprintf(msg, sizeof(msg), "EDAA: cockpit HUD shader found by its panel textures (ps %016llx)", static_cast<unsigned long long>(ctx->ps_hash));
+                reshade::log::message(reshade::log::level::info, msg);
+            }
+        }
+
+
         bool on_any_draw(command_list* cmd_list, const char* kind, uint32_t count, uint32_t instances, bool fullscreen, bool single_quad)
         {
             restore_shadow_constants(cmd_list);
@@ -836,6 +1181,12 @@ namespace edaa
 
             if (ctx == nullptr) {
                 return false;
+            }
+
+            // Elite's tonemap: copy its exposure inputs for the next frame's DLAA (exposure.hpp).
+            if (fullscreen && ctx->vs_hash == exposure::vertex_shader_hash && ctx->vs_srv0 != 0 && ctx->ps_cb2 != 0 && exposure::wanted()) {
+                exposure::capture(reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native()), reinterpret_cast<ID3D11Resource*>(ctx->vs_srv0),
+                    reinterpret_cast<ID3D11Buffer*>(ctx->ps_cb2), ctx->ps_cb2_offset);
             }
 
             cycler_record(ctx->ps_hash, false);
@@ -846,6 +1197,7 @@ namespace edaa
             }
 
             check_sun_shadows(cmd_list, ctx);
+            learn_hud_shader(ctx);
             bool want = false;
             float jx = 0, jy = 0;
             check_resolve_point(cmd_list, ctx, fullscreen, single_quad, want, jx, jy);
@@ -923,9 +1275,57 @@ namespace edaa
 
 
         // In stations the tiled lighting runs through DispatchIndirect: same handling.
-        bool on_indirect(command_list* cmd_list, indirect_command type, resource, uint64_t, uint32_t, uint32_t)
+        bool on_indirect(command_list* cmd_list, indirect_command type, resource, uint64_t, uint32_t draw_count, uint32_t)
         {
-            return type == indirect_command::dispatch && on_dispatch(cmd_list, 0, 0, 0);
+            if (type != indirect_command::dispatch) {
+                auto* ctx = context_of(cmd_list);
+
+                if (ctx != nullptr) {
+                    trace_draw(ctx, type == indirect_command::draw_indexed ? "indirect-drawindexed" : "indirect-draw", draw_count, 0);
+                }
+
+                return false;
+            }
+
+            return on_dispatch(cmd_list, 0, 0, 0);
+        }
+
+
+        // Frame trace: copies into the back buffer (the HUD might arrive that way).
+        void trace_copy(command_list* cmd_list, const char* kind, resource src, resource dst)
+        {
+            auto* ctx = context_of(cmd_list);
+
+            if (ctx == nullptr || !tracing(ctx)) {
+                return;
+            }
+
+            ctx->trace_lines++;
+            char msg[160];
+            snprintf(msg, sizeof(msg), "EDAA trace: %s src=%llx dst=%llx", kind, static_cast<unsigned long long>(src.handle),
+                static_cast<unsigned long long>(dst.handle));
+            reshade::log::message(reshade::log::level::info, msg);
+        }
+
+
+        bool on_copy_resource(command_list* cmd_list, resource src, resource dst)
+        {
+            trace_copy(cmd_list, "copy_resource", src, dst);
+            return false;
+        }
+
+
+        bool on_copy_texture_region(command_list* cmd_list, resource src, uint32_t, const subresource_box*, resource dst, uint32_t, const subresource_box*, filter_mode)
+        {
+            trace_copy(cmd_list, "copy_texture_region", src, dst);
+            return false;
+        }
+
+
+        bool on_resolve_texture_region(command_list* cmd_list, resource src, uint32_t, const subresource_box*, resource dst, uint32_t, uint32_t, uint32_t, uint32_t, format)
+        {
+            trace_copy(cmd_list, "resolve_texture_region", src, dst);
+            return false;
         }
 
 
@@ -984,6 +1384,37 @@ namespace edaa
 
         s.map_reason = !map ? "no" : (s.current.map_shader_drawn ? "yes (system map shaders)" : "yes (no sun shadow pass)");
 
+        // Diagnostics: status changes and stretches without an anti-aliasing
+        // resolve (e.g. carrier jump or hyperspace transitions), with the time in the log.
+        {
+            static int logged = 0;
+
+            if (s.resolve_ran) {
+                if (s.frames_without_resolve >= 3 && logged < 400) {
+                    ++logged;
+                    char msg[160];
+                    snprintf(msg, sizeof(msg), "EDAA status: anti-aliasing resolve back after %u frames without one", s.frames_without_resolve);
+                    reshade::log::message(reshade::log::level::info, msg);
+                }
+
+                s.frames_without_resolve = 0;
+            }
+            else if (++s.frames_without_resolve == 3 && logged < 400) {
+                ++logged;
+                reshade::log::message(reshade::log::level::info, "EDAA status: no anti-aliasing resolve for 3 frames (no scene found)");
+            }
+
+            s.resolve_ran = false;
+
+            if (s.motion_status != nullptr && std::strncmp(s.motion_status, s.logged_status, sizeof(s.logged_status) - 1) != 0 && logged < 400) {
+                ++logged;
+                std::strncpy(s.logged_status, s.motion_status, sizeof(s.logged_status) - 1);
+                char msg[256];
+                snprintf(msg, sizeof(msg), "EDAA status: %s", s.motion_status);
+                reshade::log::message(reshade::log::level::info, msg);
+            }
+        }
+
         if (s.screenshot_mode && --s.screenshot_hold <= 0) {
             s.screenshot_mode = false;
             s.history_reset = true;
@@ -999,9 +1430,12 @@ namespace edaa
         const bool upscaled = s.upscale_pending; // this frame ran for the upscaler
         s.upscale_pending = false;
         s.upscale_attempted = false;
+        s.fg_hud_pending = false;
         s.ldr_image = 0;
         s.hud_mask_done = false;
         s.hud_snapshot_stale = false;
+        s.hud_learning = s.config.hud_learn && !s.current.hud_shader;
+        s.hud_panel_count = 0;
         s.depth_candidate = s.color_candidate = 0;
         s.candidate_w = s.candidate_h = 0;
 
@@ -1094,6 +1528,10 @@ namespace edaa
         reshade::register_event<reshade::addon_event::draw_indexed>(on_draw_indexed);
         reshade::register_event<reshade::addon_event::dispatch>(on_dispatch);
         reshade::register_event<reshade::addon_event::draw_or_dispatch_indirect>(on_indirect);
+        reshade::register_event<reshade::addon_event::copy_resource>(on_copy_resource);
+        reshade::register_event<reshade::addon_event::push_descriptors>(on_push_descriptors_trace);
+        reshade::register_event<reshade::addon_event::copy_texture_region>(on_copy_texture_region);
+        reshade::register_event<reshade::addon_event::resolve_texture_region>(on_resolve_texture_region);
     }
 
 
@@ -1110,5 +1548,9 @@ namespace edaa
         reshade::unregister_event<reshade::addon_event::draw_indexed>(on_draw_indexed);
         reshade::unregister_event<reshade::addon_event::dispatch>(on_dispatch);
         reshade::unregister_event<reshade::addon_event::draw_or_dispatch_indirect>(on_indirect);
+        reshade::unregister_event<reshade::addon_event::copy_resource>(on_copy_resource);
+        reshade::unregister_event<reshade::addon_event::push_descriptors>(on_push_descriptors_trace);
+        reshade::unregister_event<reshade::addon_event::copy_texture_region>(on_copy_texture_region);
+        reshade::unregister_event<reshade::addon_event::resolve_texture_region>(on_resolve_texture_region);
     }
 }

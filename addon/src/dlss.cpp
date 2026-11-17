@@ -101,9 +101,14 @@ namespace edaa::dlss
         uint32_t info_w = 0, info_h = 0; // display size of last_info
 
 
+        // Every change also goes to ReShade.log: the normal build greys DLSS out in the
+        // overlay without saying why, so the log is the only place the reason shows.
         void set_status(const std::string& text)
         {
             const std::lock_guard<std::mutex> lock(status_mutex);
+            if (status_text != text) {
+                reshade::log::message(reshade::log::level::info, ("EDAA DLSS: " + text).c_str());
+            }
             status_text = text;
         }
 
@@ -131,6 +136,10 @@ namespace edaa::dlss
         }
 
 
+        // Fixed exposure (upscaler_inputs::dlss_exposure): 1x1 R32_FLOAT texture with the value.
+        ID3D11Texture2D* exposure_tex = nullptr;
+        float exposure_value = 0;
+
         void release_feature()
         {
             if (feature != nullptr) {
@@ -138,7 +147,40 @@ namespace edaa::dlss
                 feature = nullptr;
             }
 
+            if (exposure_tex != nullptr) {
+                exposure_tex->Release();
+                exposure_tex = nullptr;
+            }
+
             current = {};
+        }
+
+        // The exposure texture holding 'value' (created or updated); nullptr on failure.
+        ID3D11Texture2D* exposure_texture(ID3D11Device* device, ID3D11DeviceContext* ctx, float value)
+        {
+            if (exposure_tex == nullptr) {
+                D3D11_TEXTURE2D_DESC desc = {};
+                desc.Width = desc.Height = 1;
+                desc.MipLevels = desc.ArraySize = 1;
+                desc.Format = DXGI_FORMAT_R32_FLOAT;
+                desc.SampleDesc.Count = 1;
+                desc.Usage = D3D11_USAGE_DEFAULT;
+                desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                const D3D11_SUBRESOURCE_DATA data = { &value, sizeof(float), sizeof(float) };
+
+                if (FAILED(device->CreateTexture2D(&desc, &data, &exposure_tex))) {
+                    exposure_tex = nullptr;
+                    return nullptr;
+                }
+
+                exposure_value = value;
+            }
+            else if (exposure_value != value) {
+                ctx->UpdateSubresource(exposure_tex, 0, nullptr, &value, sizeof(float), sizeof(float));
+                exposure_value = value;
+            }
+
+            return exposure_tex;
         }
 
 
@@ -294,9 +336,13 @@ namespace edaa::dlss
 
 
         // Evaluates the current feature on 'in' (render size width x height).
-        bool run(ID3D11DeviceContext* ctx, const upscaler_inputs& in)
+        bool run(ID3D11DeviceContext* ctx, const upscaler_inputs& in, ID3D11Resource* exposure = nullptr)
         {
             NVSDK_NGX_D3D11_DLSS_Eval_Params eval = {};
+            // Fixed exposure (feature created without AutoExposure): the scene value times it is what DLSS works on.
+            eval.pInExposureTexture = exposure;
+            eval.InPreExposure = 1.0f;
+            eval.InExposureScale = 1.0f;
             eval.Feature.pInColor = in.color;
             eval.Feature.pInOutput = in.output;
             eval.pInDepth = in.depth;
@@ -373,13 +419,32 @@ namespace edaa::dlss
             return false;
         }
 
-        const feature_key key = { in.width, in.height, in.width, in.height, NVSDK_NGX_PerfQuality_Value_DLAA, dlaa_flags, valid_preset(in.dlss_preset) };
+        // Fixed or Elite's exposure: without AutoExposure (the feature is recreated when this changes).
+        const bool fixed = in.dlss_exposure > 0 || in.exposure_tex != nullptr;
+        const int flags = fixed ? dlaa_flags & ~NVSDK_NGX_DLSS_Feature_Flags_AutoExposure : dlaa_flags;
+        const feature_key key = { in.width, in.height, in.width, in.height, NVSDK_NGX_PerfQuality_Value_DLAA, flags, valid_preset(in.dlss_preset) };
 
-        if (!create_feature(ctx, key) || !run(ctx, in)) {
+        if (!create_feature(ctx, key)) {
             return false;
         }
 
-        set_status(std::string("running (DLAA, preset ") + preset_name(key.preset) + ")");
+        ID3D11Resource* const exposure = in.exposure_tex != nullptr ? in.exposure_tex
+            : fixed                                                  ? exposure_texture(device, ctx, in.dlss_exposure)
+                                                                     : nullptr;
+
+        if (fixed && exposure == nullptr) {
+            set_status("cannot create the exposure texture");
+            return false;
+        }
+
+        if (!run(ctx, in, exposure)) {
+            return false;
+        }
+
+        char text[96];
+        snprintf(text, sizeof(text), "running (DLAA, preset %s, exposure %s)", preset_name(key.preset),
+            in.exposure_tex != nullptr ? "from Elite" : fixed ? "fixed" : "by DLSS");
+        set_status(text);
         return true;
     }
 

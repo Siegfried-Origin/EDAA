@@ -21,4 +21,7 @@ namespace edaa
 
     void register_mip_bias_events();
     void unregister_mip_bias_events();
+
+    void register_fg_events();
+    void unregister_fg_events();
 }

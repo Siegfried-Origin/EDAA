@@ -21,6 +21,7 @@
 // vehicle pixels (stencil mask), it gives them their true motion, head
 // movements included, instead of none.
 
+#include "gpu_profiler.hpp"
 #include "profile.hpp"
 #include "events.hpp"
 #include "state.hpp"
@@ -68,6 +69,10 @@ namespace edaa
         uint32_t pending_maps = 0;
         float pending_read_ms = 0;
         std::vector<record> previous; // records of the previous frame
+        // Log (analysis on): camera reprojection error of every moving object on screen,
+        // summed up every 600 analysed frames with the GPU timings' test scene.
+        std::vector<float> log_errors;
+        uint32_t log_frames = 0, log_frames_moving = 0, log_max_on_screen = 0;
 
 
         // Milliseconds since boot (double: a float has ~8 ms resolution there).
@@ -395,6 +400,11 @@ namespace edaa
                 if (!vehicle) {
                     st.visible_moving++;
                     error_sum += m.error_px;
+
+                    if (log_errors.size() < 1000000) {
+                        log_errors.push_back(m.error_px);
+                    }
+
                     st.max_error_px = std::max(st.max_error_px, m.error_px);
                 }
             }
@@ -465,6 +475,37 @@ namespace edaa
         }
 
         s.objects.match_ms = static_cast<float>(now_ms() - start);
+        log_frames++;
+        log_frames_moving += s.objects.visible_moving > 0 ? 1 : 0;
+        log_max_on_screen = std::max(log_max_on_screen, s.objects.visible_moving);
+
+        if (log_frames >= 600) {
+            float max_px = 0, p95 = 0, p99 = 0;
+            double mean = 0;
+            const size_t n = log_errors.size();
+
+            if (n > 0) {
+                for (const float e : log_errors) {
+                    mean += e;
+                    max_px = std::max(max_px, e);
+                }
+
+                mean /= static_cast<double>(n);
+                std::sort(log_errors.begin(), log_errors.end());
+                p95 = log_errors[std::min(n - 1, n * 95 / 100)];
+                p99 = log_errors[std::min(n - 1, n * 99 / 100)];
+            }
+
+            const float to_display = s.render_w > 0 ? static_cast<float>(s.back_buffer_w) / static_cast<float>(s.render_w) : 1.0f;
+            char msg[320];
+            snprintf(msg, sizeof(msg),
+                "EDAA objects: scene %c | %u frames, %u with moving objects on screen (up to %u) | camera reprojection error over %zu samples: "
+                "mean %.2f, p95 %.2f, p99 %.2f, max %.2f px (render size; x%.2f on the display)",
+                gpu_profiler::scene(), log_frames, log_frames_moving, log_max_on_screen, n, mean, p95, p99, max_px, to_display);
+            reshade::log::message(reshade::log::level::info, msg);
+            log_errors.clear();
+            log_frames = log_frames_moving = log_max_on_screen = 0;
+        }
 
         const std::lock_guard<std::mutex> lock(records_mutex);
         previous.swap(cur);

@@ -22,6 +22,8 @@ namespace edaa
         objects = 5, // moving instances and how far camera reprojection misses them
         temporal_change = 6, // how much the TAA output changed since the last frame (flicker finder, camera still)
         hud_mask = 7, // upscaling: where the cockpit HUD was found (DLSS uses the current frame there)
+        reactive = 8, // DLSS/XeSS reactive mask: where transparents changed the scene (particles, glass, glows)
+        ship_auto = 9, // automatic own-ship detection (moves with the camera), compared with the game stencil
     };
 
     // Which resolve replaces the game's anti-aliasing.
@@ -50,7 +52,23 @@ namespace edaa
         bool upscale_hud_mask = true; // upscaling: the cockpit HUD uses the current frame only (no trails)
         float upscale_sharpness = 0.5f; // EDAA TAA upscaling: contrast-adaptive sharpening, 0..1
         bool upscale_mip_bias = true; // upscaling: scene textures sampled with the display resolution mips (mip_bias.cpp)
+        int fg_factory = 1; // frame generation: 0 = system dxgi.dll (crashes with ReShade), 1 = ReShade's dxgi.dll (fg_present.cpp)
+        int fg_fps_limit = 140; // frame generation: Reflex limit of the displayed frames (real + generated), 0 = none
+        bool fg_hud_protect = true; // frame generation: the cockpit HUD stands still in the generated frames (no smearing)
+        bool fg_generate = false; // DLSS Frame Generation through Streamline (fg_present.cpp)
+        bool fg_present_test = false; // present through a D3D12 swap chain (needed by fg_generate, read at game start)
+        bool gpu_profiler = false; // overlay "GPU timings": time EDAA's passes on the GPU (gpu_profiler.cpp)
+        bool dlss_reactive_mask = false; // DLSS/XeSS: current frame where transparents were drawn (reactive mask)
+        float dlss_reactive_strength = 1.0f; // its scale, 0..2
+        float dlss_reactive_threshold = 0.75f; // share of the pixel the transparents must change to count, 0..0.95
+        int dlss_exposure_mode = 0; // DLAA exposure: 0 estimated by DLSS, 1 fixed (dlss_exposure), 2 Elite's own (exposure.hpp; dlss_exposure when not found)
+        float dlss_exposure = 10.0f; // fixed DLAA exposure, multiplier of the HDR scene values (10 looked best in game, 11.11.)
+        float dlss_exposure_scale = 1.0f; // dlss_exposure_mode 2: Elite's exposure times this
+        float dlss_sharpness = 0.0f; // DLAA: sharpening of its output 0..1 (ps_sharpen_hdr), 0 = off
         int dlss_preset = 0; // DLSS model: 0 = NVIDIA's default (K for DLAA), else NVSDK_NGX_DLSS_Hint_Render_Preset (J 10, K 11, L 12, M 13)
+        bool record_full_frame = false; // developer: recorder.cpp records the whole frame instead of the 1600x900 centre
+        int record_max_mb = 4096; // developer: memory a recording may use before it stops
+        float record_delay_s = 0.0f; // developer: seconds between Ctrl+Shift+R and the start of a recording (time to get moving)
         float mip_bias_extra = 0; // developer, not saved: added to the upscaling mip bias
         bool upscaler_jitter_flip = false; // developer, not saved: negate the jitter passed to DLSS/XeSS (sign convention check)
         bool jitter_enabled = true; // follows taa_enabled unless changed in developer builds
@@ -68,7 +86,16 @@ namespace edaa
         float taa_clip_gamma_static = 5.0f; // clip box for still pixels (larger = less flicker)
         bool map_detect_no_shadows = true; // also treat frames without sun shadow pass as a map
         bool taa_before_hud = true; // resolve before the HUD pass: HUD/holograms not anti-aliased, no ghosting
+        bool aa_ship_steady = false; // anti-aliasing: the player's own ship (automatic detection, aa_ship_distance) moves with the camera, not with the world
+        float aa_ship_distance = 0.0f; // aa_ship_steady: closer than this (m) counts as the own ship too, 0 = only the automatic detection
+        bool hud_motion = false; // upscaling: the cockpit HUD (HUD mask) gets the vehicle's motion vectors, not the world's behind it
+        bool hud_learn = false; // find the cockpit HUD shader by the HUD panel textures it reads (shader replaced, e.g. EDHM)
         bool taa_soft_offscreen = true; // reuse the edge of the history for pixels entering the screen
+        bool taa_sharp = false; // sharper native TAA: samples near the pixel centre count more, output sharpened 0.6 (docs/replay.md study)
+        bool spec_stable = false; // glint stabiliser after DLAA / XeSS / FSR: blinking glints blended with the last frame (ps_spec_stable)
+        float spec_stable_strength = 0.8f; // share of the last frame on a glint
+        float spec_stable_contrast = 0.02f; // how much brighter than its neighbourhood a glint is (compressed HDR)
+        float spec_stable_clip = 1.5f; // last frame limited to the neighbourhood's range widened by this many standard deviations
         float taa_hdr_scale = 30.0f; // scene values are multiplied by this before the HDR compression c/(1+c) (30: chosen in game)
 
         bool motion_enabled = true;
@@ -215,7 +242,14 @@ namespace edaa
         std::atomic<bool> upscale_pending = false; // the resolve ran for upscaling: replace the game's upscale draw
         bool upscale_attempted = false; // first draw into a display-size target after the resolve seen
         bool hud_snapshot_stale = false; // a fullscreen pass was drawn into the scene after the resolve
+        std::atomic<bool> fg_hud_pending = false; // the resolve ran for frame generation with the HUD mask: build it this frame
         bool hud_mask_done = false; // HUD mask built this frame (at the bloom, or at the upscale without bloom)
+        // hud_learn: HUD panel textures (offscreen colour + D24S8 targets) of this frame;
+        // looked for while no HUD shader was drawn in the last frame.
+        std::atomic<bool> hud_learning = false;
+        bool bloom_fallback_logged = false; // "no bloom pass found" written to the log once
+        uint64_t hud_panels[8] = {};
+        int hud_panel_count = 0;
         uint64_t ldr_image = 0; // last render-size R8G8B8A8 target drawn after the resolve (tonemap / SMAA output)
         const char* upscale_status = "off";
         bool motion_ok = false; // motion vectors generated last frame
@@ -225,6 +259,10 @@ namespace edaa
         int resolve_misses = 0;
         bool jitter_allowed = true;
         const char* motion_status = "not started";
+        // Diagnostics (log): resolve seen this frame, frames in a row without one, last logged status.
+        bool resolve_ran = false;
+        uint32_t frames_without_resolve = 0;
+        char logged_status[192] = {};
 
         bool capture_requested = false; // Ctrl+Shift+C / overlay button
         std::string capture_path; // UTF-8 base folder, "[EDAA] CapturePath" in ReShade.ini
@@ -253,6 +291,16 @@ namespace edaa
         std::atomic<uint32_t> biased_binds = 0; // sampler binds given the bias this frame
         uint32_t last_biased_binds = 0; // same, last frame (overlay)
         std::atomic<bool> dumping = false; // logging the frame in progress (atomic: tested per draw without the lock)
+
+        // Reactive mask (frame_tracking.cpp detects, passes.cpp builds), this frame and the log window.
+        bool reactive_gate = false; // fog composite seen: blended draws after it are transparents
+        bool reactive_snapped = false; // scene saved before the first transparent draw
+        bool reactive_quad_pending = false; // a 4-vertex quad was drawn into the scene since the last snapshot
+        uint32_t reactive_snapshots = 0; // snapshots this frame (one after each such quad)
+        uint32_t reactive_draws = 0; // transparent draws counted after the gate
+        bool reactive_made = false; // the resolve built the mask
+        uint32_t reactive_log_frames = 0, reactive_log_gate = 0, reactive_log_snap = 0, reactive_log_made = 0;
+        uint64_t reactive_log_draws = 0, reactive_log_snapshots = 0;
     };
 
     addon_state& state();
@@ -335,6 +383,9 @@ namespace edaa
     // Returns true when the draw must be skipped (state not locked).
     bool run_upscale(reshade::api::command_list* cmd_list);
 
+    // Reactive mask: saves the scene before the first transparent draw (state not locked).
+    void run_reactive_snapshot(reshade::api::command_list* cmd_list, uint64_t scene_color);
+
     // Right before the game's bloom when upscaling: builds the HUD mask from the
     // scene saved at the resolve point (state not locked).
     void run_hud_mask(reshade::api::command_list* cmd_list);
@@ -351,6 +402,10 @@ namespace edaa
 
     // Overlay window registered with ReShade.
     void draw_overlay(reshade::api::effect_runtime* runtime);
+
+    // Developer builds: the recorder's line over the game (reshade_overlay event,
+    // also while the overlay is closed).
+    void draw_recorder_osd(reshade::api::effect_runtime* runtime);
 
     const char* to_string(frame_mode mode);
 }

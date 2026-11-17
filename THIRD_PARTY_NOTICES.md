@@ -4,7 +4,7 @@ EDAA itself is released under the MIT License (`LICENSE`). It includes or is bui
 license texts are installed in `Program Files\EDAA\licenses` and are in the
 `third_party/` submodules of the source repository.
 
-## NVIDIA DLSS SDK (DLSS 310.9.1)
+## NVIDIA DLSS SDK (DLSS 310.9.16)
 
 - Used for: NVIDIA DLAA (`nvsdk_ngx_s.lib` linked into `EDAA.addon64`,
   `nvngx_dlss.dll` shipped next to it).
@@ -294,6 +294,18 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ```
+
+## NVIDIA Streamline SDK (v2.14.16)
+
+- Used for: DLSS Frame Generation and Reflex (`sl.interposer.dll`,
+  `sl.common.dll`, `sl.dlss_g.dll`, `sl.reflex.dll`, `sl.pcl.dll`, loaded at
+  run time by the add-on; headers at build time, not in the repository).
+- Source: https://github.com/NVIDIA-RTX/Streamline
+- License: MIT (`licenses/NVIDIA-Streamline-LICENSE.txt`). `nvngx_dlssg.dll`
+  (the DLSS-G library) is distributed under the NVIDIA RTX SDKs / NGX SDK
+  license (`licenses/NVIDIA-NGX-SDK-LICENSE.txt`).
+- NVIDIA, DLSS, Reflex and Streamline are trademarks and/or registered
+  trademarks of NVIDIA Corporation.
 
 ## Intel XeSS SDK
 
