@@ -10,7 +10,9 @@ cbuffer taa_constants : register(b0)
     float4 jitter; // xy: current jitter in UV, z: unjitter current sample (0/1), w: reconstruction filter (0/1)
     float4 blend; // x: history weight, y: history weight at high motion, z: reset (1 = no history), w: variance clip gamma
     float4 flicker; // x: anti-flicker on, y: minimum history weight, z: clip gamma for static pixels, w: soft off-screen on
-    float4 hdr; // x: scale applied before the HDR compression (the scene is not exposed yet)
+    float4 hdr; // x: scale applied before the HDR compression (the scene is not exposed yet),
+                // y: jitter weighting strength (0 = off), z: history sharpening (0 = off),
+                // w: jitter weighting normaliser (1 / mean weight over the jitter square)
     float4 display_size; // upscaling (ps_taau): w, h, 1/w, 1/h of the output
     float4 sharpen; // upscaling (ps_sharpen): x: sharpness 0..1
 };
@@ -185,7 +187,24 @@ float4 ps_taa(float4 pos : SV_Position) : SV_Target
     float rejection = 1; // for the debug view: 0 = history fully kept, 1 = discarded
 
     if (history_weight > 0) {
-        const float3 raw = rgb_to_ycocg(tonemap(sample_history(history_uv, render_size)));
+        float3 sampled = tonemap(sample_history(history_uv, render_size));
+
+        // History sharpening: resampling the history at a fraction of a pixel
+        // blurs it a little every frame, which adds up while the camera turns.
+        // Undo that blur (largest at half a pixel, none on still pixels) with
+        // a small unsharp mask; the clip box below still bounds the result.
+        if (hdr.z > 0) {
+            const float2 f = frac(history_uv * render_size.xy - 0.5);
+            const float blur = 2 * (f.x * (1 - f.x) + f.y * (1 - f.y)); // 0 on texel centres, 1 at half a texel
+            const float2 d = render_size.zw;
+            const float3 around = 0.25 * (tonemap(history_tex.SampleLevel(linear_clamp, history_uv + float2(d.x, 0), 0).rgb) +
+                tonemap(history_tex.SampleLevel(linear_clamp, history_uv - float2(d.x, 0), 0).rgb) +
+                tonemap(history_tex.SampleLevel(linear_clamp, history_uv + float2(0, d.y), 0).rgb) +
+                tonemap(history_tex.SampleLevel(linear_clamp, history_uv - float2(0, d.y), 0).rgb));
+            sampled = saturate(sampled + hdr.z * blur * (sampled - around));
+        }
+
+        const float3 raw = rgb_to_ycocg(sampled);
         history = clip_aabb(raw, clip_min, clip_max);
         rejection = saturate(length(raw - history) * 8);
 
@@ -198,12 +217,81 @@ float4 ps_taa(float4 pos : SV_Position) : SV_Target
         }
     }
 
+    // Jitter weighting: this frame's sample lies |jitter| pixels from the pixel
+    // centre. A sample close to the centre adds more to the history, a far one
+    // less (normalised so the average stays the same): the accumulated image
+    // then holds less of the jitter footprint, which is what makes it soft.
+    if (hdr.y > 0 && history_weight > 0 && history_weight < 1) {
+        const float2 jitter_px2 = jitter.xy * render_size.xy;
+        const float w = exp(-hdr.y * dot(jitter_px2, jitter_px2)) * hdr.w;
+        history_weight = 1 - saturate((1 - history_weight) * w);
+    }
+
     // Luminance-weighted blend (values are already compressed, so 1 - luma weighting).
     const float wc = (1 - history_weight) * (1 - current.x);
     const float wh = history_weight * (1 - history.x);
     const float3 result = (current * wc + history * wh) / max(wc + wh, 1e-5);
     // Clamp before inverting the compression (it diverges at 1): up to 1e5 / scale.
     return float4(untonemap(clamp(ycocg_to_rgb(result), 0, 0.99999)), rejection);
+}
+
+
+// Glint stabiliser (spec_stable), after DLAA / XeSS / FSR: the neural AA keeps
+// thin glints sharp, so they still blink from frame to frame. Where this
+// frame's output (t0) or the previous stabilised output (t1, moved along the
+// motion vectors t2) is clearly brighter than this frame's 3x3 neighbourhood,
+// the two are blended: the previous one, limited to the neighbourhood's range
+// (no trails where the glint really moved away), counts up to 'strength'.
+// Elsewhere the output passes through. Left alone: sky (t3 depth 0) and
+// transparents (t4 reactive mask, unbound = 0). Writes the next history.
+// sharpen.x: strength 0..1, sharpen.y: glint contrast (compressed HDR),
+// sharpen.z: clip box in standard deviations; blend.z: reset.
+float3 ps_spec_stable(float4 pos : SV_Position) : SV_Target
+{
+    const int2 p = int2(pos.xy);
+    const int2 last = int2(render_size.xy) - 1;
+    const float3 raw = scene_color.Load(int3(p, 0));
+    const float3 c = tonemap(raw);
+    const float lc = max(c.r, max(c.g, c.b));
+    float3 m1 = 0, m2 = 0, box_min = 1e9, box_max = -1e9;
+    float around = 0;
+
+    // clang-format off
+    [unroll] for (int y = -1; y <= 1; ++y) {
+        [unroll] for (int x = -1; x <= 1; ++x) {
+            const float3 n = tonemap(scene_color.Load(int3(clamp(p + int2(x, y), int2(0, 0), last), 0)));
+            m1 += n;
+            m2 += n * n;
+            box_min = min(box_min, n);
+            box_max = max(box_max, n);
+            around += x != 0 || y != 0 ? max(n.r, max(n.g, n.b)) : 0;
+        }
+    }
+    // clang-format on
+
+    around /= 8;
+    const float2 history_uv = (pos.xy * render_size.zw) + motion_tex.Load(int3(p, 0));
+    const bool gate = scene_depth.Load(int3(p, 0)) > 0 && hud_mask_tex.Load(int3(p, 0)) < 0.1;
+
+    if (blend.z > 0 || !gate || sharpen.x <= 0 || any(history_uv < 0) || any(history_uv > 1)) {
+        return raw;
+    }
+
+    const float3 prev = tonemap(history_tex.SampleLevel(linear_clamp, history_uv, 0).rgb);
+    const float lp = max(prev.r, max(prev.g, prev.b));
+    // Glint now, or a glint last frame that is gone now.
+    const float t = max(sharpen.y, 1e-3);
+    const float glint = saturate((max(lc, lp) - around - t) / t);
+
+    if (glint <= 0) {
+        return raw;
+    }
+
+    const float3 mean = m1 / 9;
+    const float3 sigma = sqrt(max(m2 / 9 - mean * mean, 0));
+    const float3 kept = clamp(prev, min(box_min, mean - sharpen.z * sigma), max(box_max, mean + sharpen.z * sigma));
+    const float3 result = lerp(c, kept, sharpen.x * glint);
+    return untonemap(clamp(result, 0, 0.99999));
 }
 
 
@@ -348,7 +436,13 @@ float3 ps_sharpen(float4 pos : SV_Position) : SV_Target
 // only when what was added is at least half as bright as what was under it,
 // so faint glows do not cost it its history. Dilated by one pixel to cover the
 // edges once upscaled.
-float ps_hud_mask(float4 pos : SV_Position) : SV_Target
+struct hud_mask_output
+{
+    float changed : SV_Target0; // 1 where the HUD changed the pixel or a neighbour (frame generation, TAA upscaling)
+    float graded : SV_Target1; // 0..1: how much the HUD makes up the pixel (reactive mask of the upscalers)
+};
+
+hud_mask_output ps_hud_mask(float4 pos : SV_Position)
 {
     float changed = 0;
 
@@ -366,7 +460,55 @@ float ps_hud_mask(float4 pos : SV_Position) : SV_Target
     }
     // clang-format on
 
-    return changed;
+    // Graded, this pixel only: the HUD's share of the pixel. Bright text and lines
+    // (share near 1) keep no history in the upscaler; the faint tint of a panel's
+    // background (share just above the 1/3 of 'changed') keeps it, so the scene
+    // behind stays anti-aliased instead of flickering inside the panel rectangle.
+    const int3 c = int3(pos.xy, 0);
+    const float3 before = history_tex.Load(c).rgb;
+    const float3 diff = abs(scene_color.Load(c) - before);
+    const float added = max(diff.r, max(diff.g, diff.b));
+    const float under = max(before.r, max(before.g, before.b));
+    const float share = added / (added + under + 1e-4);
+
+    hud_mask_output o;
+    o.changed = changed;
+    o.graded = added > 0.004 ? smoothstep(0.34, 0.75, share) : 0;
+    return o;
+}
+
+
+// Reactive mask for DLSS / XeSS (their "bias current colour" input): the share
+// of the pixel the transparents (particles, glass, glows) changed since the
+// snapshot taken right before the first of them (t1), times the strength
+// (sharpen.y). Shares below the threshold (sharpen.z: thin haze, light shafts
+// over the whole room) count as nothing. 1 = the upscaler uses the current frame.
+float ps_reactive(float4 pos : SV_Position) : SV_Target
+{
+    const int3 p = int3(pos.xy, 0);
+    const float3 now = scene_color.Load(p);
+    const float3 before = history_tex.Load(p).rgb;
+    const float3 diff = abs(now - before);
+    const float changed = max(diff.r, max(diff.g, diff.b));
+    const float level = max(max(now.r, max(now.g, now.b)), max(before.r, max(before.g, before.b)));
+    const float share = changed / max(level, 1e-4);
+    return saturate(sharpen.y * saturate((share - sharpen.z) / max(1 - sharpen.z, 1e-3)));
+}
+
+
+// Frame generation: the motion vectors with the cockpit HUD standing still
+// (the HUD keeps its place on screen while the scene moves behind it).
+float2 ps_fg_motion(float4 pos : SV_Position) : SV_Target
+{
+    const int3 p = int3(pos.xy, 0);
+    return hud_mask_tex.Load(p) > 0.5 ? float2(0, 0) : motion_tex.Load(p);
+}
+
+
+// Frame generation with hud_motion: the HUD already has the cockpit's motion.
+float2 ps_fg_motion_keep(float4 pos : SV_Position) : SV_Target
+{
+    return motion_tex.Load(int3(pos.xy, 0));
 }
 
 
@@ -374,4 +516,37 @@ float ps_hud_mask(float4 pos : SV_Position) : SV_Target
 float3 ps_copy(float4 pos : SV_Position) : SV_Target
 {
     return history_tex.Load(int3(pos.xy, 0)).rgb;
+}
+
+
+// DLAA output (t1, HDR before the game's exposure) sharpened into the game's
+// scene target: the same contrast-adaptive weights as ps_sharpen, computed on
+// the HDR compressed by tonemap() (hdr.x) so bright stars and engines do not
+// dominate, and the result limited to the 4 neighbours' range (like AMD RCAS)
+// so edges get steeper without bright or dark rims. DLSS keeps its own
+// history, so the sharpened copy is never fed back. sharpen.x: 0..1.
+float3 ps_sharpen_hdr(float4 pos : SV_Position) : SV_Target
+{
+    const int2 p = int2(pos.xy);
+    const int2 last = int2(render_size.xy) - 1;
+    const float3 raw = history_tex.Load(int3(p, 0)).rgb;
+
+    if (sharpen.x <= 0) {
+        return raw;
+    }
+
+    const float3 c = tonemap(raw);
+    const float3 n = tonemap(history_tex.Load(int3(clamp(p + int2(0, -1), int2(0, 0), last), 0)).rgb);
+    const float3 s = tonemap(history_tex.Load(int3(clamp(p + int2(0, 1), int2(0, 0), last), 0)).rgb);
+    const float3 w = tonemap(history_tex.Load(int3(clamp(p + int2(-1, 0), int2(0, 0), last), 0)).rgb);
+    const float3 e = tonemap(history_tex.Load(int3(clamp(p + int2(1, 0), int2(0, 0), last), 0)).rgb);
+    const float3 lo4 = min(min(n, s), min(w, e));
+    const float3 hi4 = max(max(n, s), max(w, e));
+    const float3 lo = min(c, lo4);
+    const float3 hi = max(c, hi4);
+    const float3 amount = sqrt(saturate(min(lo, 1 - hi) / max(hi, 1e-4)));
+    const float3 weight = -amount / lerp(8.0, 5.0, sharpen.x);
+    const float3 sharp = (c + (n + s + w + e) * weight) / (1 + 4 * weight);
+    // At most as dark or as bright as the darkest/brightest neighbour or the pixel itself.
+    return untonemap(clamp(sharp, lo, min(hi, 0.999)));
 }

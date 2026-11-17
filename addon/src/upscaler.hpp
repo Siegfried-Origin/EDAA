@@ -23,6 +23,8 @@ namespace edaa
         float jitter_x = 0, jitter_y = 0; // pixels, the viewport offset of this frame
         bool reset = false; // camera cut: drop the history
         bool hdr = true; // false: tonemapped image (upscaling at the end of the frame)
+        ID3D11Resource* exposure_tex = nullptr; // DLAA only: 1x1 R32_FLOAT exposure (Elite's, dlss_exposure_mode 2); else dlss_exposure
+        float dlss_exposure = 0; // DLAA only: fixed exposure (multiplier of the scene values) instead of DLSS's own estimate, 0 = DLSS estimates it
         int dlss_preset = 0; // DLSS only: NVSDK_NGX_DLSS_Hint_Render_Preset value, 0 = NVIDIA's default
     };
 

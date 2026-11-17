@@ -204,18 +204,28 @@ Output: `build\Release\EDAA.addon64` (static CRT) and, with the SDKs,
 all three for the game folder. `-DEDAA_WITH_XESS=OFF` builds without XeSS.
 Dependencies are git submodules in `third_party/`, pinned to a version:
 ReShade (tag v6.8.0, add-on API headers), Dear ImGui (the commit ReShade
-6.8.0 uses) and the NVIDIA DLSS SDK (310.9.1). The DLSS repository is large
+6.8.0 uses) and the NVIDIA DLSS SDK (310.9.16). The DLSS repository is large
 (~1.6 GB even shallow); EDAA uses its headers, `nvsdk_ngx_s.lib` and the
 release `nvngx_dlss.dll`. The submodule only references NVIDIA's repository:
 the SDK license (NVIDIA RTX SDKs) allows shipping it only inside an
 application. Without the DLSS submodule (or with `-DEDAA_WITH_DLSS=OFF`) the
 add-on builds without DLSS:
 `git submodule update --init --depth 1 third_party/reshade third_party/imgui`.
-Developer build (debug views, jitter controls, auto capture, frame trace,
-camera and diagnostics sections, extra hotkeys): add `-DEDAA_DEVELOPER=ON`,
-e.g. `cmake -S . -B build-dev -A x64 -DEDAA_DEVELOPER=ON`; Debug builds always
-include them. The normal build shows only TAA on/off, status, "Reset to
-defaults" and an "Advanced settings" section.
+Developer build (TAA tuning and game fixes, GPU timings, reactive mask
+tuning, jitter
+controls, auto capture, frame trace, camera and diagnostics sections, extra
+hotkeys): add `-DEDAA_DEVELOPER=ON`, e.g.
+`cmake -S . -B build-dev -A x64 -DEDAA_DEVELOPER=ON`; Debug builds always
+include them. The player build shows what a player needs or likes to change:
+anti-aliasing on/off, method, DLSS model, DLAA exposure (estimated by DLSS,
+fixed, or Elite's own), reactive mask, "Keep own ship
+steady" (with the ship distance), DLAA sharpening, TAA upscaling
+sharpness, "Cockpit HUD without trails", frame generation (on/off,
+HUD steady, frame limit), one status line each, "Reset to defaults" and
+"Advanced settings" (resolve before the HUD, HUD by panel textures, HUD moves
+with the cockpit, let the game upscale). Hidden values keep their
+`ReShade.ini` value; "Reset to defaults" resets them too. The app hides the
+same values unless it is started with `--dev`.
 `tools\package.ps1` builds and packs `EDAA.addon64` + `INSTALL.txt` into
 `dist\EDAA-<date>\` and a zip (nothing is copied into the game folder).
 Shaders in `addon/shaders/` are compiled to headers by fxc at build time.
@@ -248,6 +258,7 @@ Developer builds only:
 TAA is on by default. Every change (overlay or `Ctrl+Shift+T`) is saved in
 `ReShade.ini`, section `[EDAA]`, and loaded at the next start; "Reset to
 defaults" restores the values below. The debug view always starts off.
+The TAA values below are in the developer build's "TAA tuning and game fixes".
 
 
 | Setting | Default | Effect |
@@ -258,11 +269,14 @@ defaults" restores the values below. The debug view always starts off.
 | Anti-flicker, min history weight | on, 0.95 | history weight when current and history disagree (at 0.95, above the history weight, it has no effect: chosen in game as the least flickering) |
 | HDR compression scale | 30 | scene values (before the game's exposure) are multiplied by it before the c/(1+c) compression used for filtering and blending; higher = bright thin edges make their dark neighbours ripple less with the jitter. At 1 high-contrast edges in stations flickered; 30-50 fixes them; near 1000 highlights look wrong |
 | Soft screen edges | on | pixels entering the screen reuse the edge of the history |
+| Sharper TAA | off | native TAA only: a sample close to the pixel centre adds more to the history (jitter weighting, exp(-8 d²), normalised) and the output is sharpened 0.6 with the DLAA sharpening shader (not fed back). Replay study on 6 scenes with motion (on foot, low flight, space, station; [replay.md](replay.md)), relative to the unsmoothed input: sharpness 80 → 86, flicker of the most unstable pixels 21 → 25 (DLAA: 91 / 27). Sharpening the history as well (shader term `hdr.z`, still in `taa.hlsl`) looked good on calm scenes but feeds back in motion: flicker 52, sharper than the input |
 | Reconstruction filter | off | current sample = Gaussian 3x3 around the unjittered pixel centre; meant to make thin highlights fade instead of flicker, but in game it softens the image without a visible gain |
 | Unjitter current sample | off | softer image (when the filter is off) |
 | Resolve before the HUD pass | on | HUD/holograms out of the TAA |
 | Upscaling | Game | Game (bilinear or FSR) or NVIDIA DLSS when rendering below the display size |
 | DLSS model | Default | render preset hint passed to NGX when the DLSS feature is created (DLAA and upscaling): Default (NVIDIA's choice, K for DLAA in the 310.x SDK), K, J, M or L; `[EDAA] dlss_preset` in `ReShade.ini` (0, 11, 10, 13, 12) |
+| DLAA sharpening | 0 (off) | contrast-adaptive sharpening of the DLAA output while it is copied back into the game's scene target (`ps_sharpen_hdr`): computed on the HDR compressed like the TAA's, limited to the 4 neighbours' range (no rims); DLSS keeps its own history, so nothing is sharpened twice; HUD/holograms come later and stay unsharpened; `[EDAA] dlss_sharpness` 0..1 |
+| Calm blinking glints | off | DLAA / XeSS / FSR at native resolution (`ps_spec_stable`, after the AA, before the sharpening): a pixel that is clearly brighter than its 3x3 neighbourhood, now or in the last frame moved along the motion vectors, is blended with the last stabilised frame (up to 0.8), which is first limited to the neighbourhood's range (no trails where a glint really moved). Sky (stars) and reactive-mask pixels (engines, lights) are left alone. Own history, never fed into DLSS. Replay on 12 scenes, relative to the input without anti-aliasing: glint flicker 21 -> 14, sharpness 87 -> 84; `[EDAA] spec_stable`, `spec_stable_strength`, `spec_stable_contrast`, `spec_stable_clip` |
 | Vehicle mask | game stencil | or distance to camera (with auto-off on foot) |
 | Capture folder (developer) | `%USERPROFILE%\Documents\EDAA-captures` | stored as `[EDAA] CapturePath` in `ReShade.ini` |
 
@@ -275,6 +289,10 @@ defaults" restores the values below. The debug view always starts off.
   statistics) to `<capture folder>/<date_time>/`,
   and traces that frame into `ReShade.log`. Keep doing the same thing
   (still, or turning steadily) during the capture.
+* **Recording for replay** (`Ctrl+Shift+R`, `recorder.cpp`): the AA inputs of
+  every frame (scene, depth, motion vectors, masks, tonemap constants,
+  parameters) into `<capture folder>/recordings/`, see
+  [recording.md](recording.md).
 * **Frame trace** ("Dump/trace next frame"): one frame of all render target
   bindings and of the draws that touch the scene depth or HDR target (up to
   20000 lines) in `ReShade.log`, with pixel shader hash, depth test and compare

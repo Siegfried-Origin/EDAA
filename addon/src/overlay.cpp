@@ -1,13 +1,19 @@
 // "EDAA" window in the ReShade overlay.
 //
-// Normal build: TAA on/off, status, reset to defaults, and an "Advanced
-// settings" section with the tuning values. Developer build (CMake option
-// EDAA_DEVELOPER, or a Debug build): also jitter, debug views, auto capture,
-// camera decoding and diagnostics. Every change is saved to ReShade.ini.
+// Player build: what a player needs or likes to change (method, model,
+// sharpness, frame generation, a few HUD options) and one status line each.
+// Developer build (CMake option EDAA_DEVELOPER, or a Debug build): also the
+// TAA tuning, masks and debug views, GPU timings, jitter, auto capture,
+// camera decoding and diagnostics. Hidden values keep their ReShade.ini value;
+// "Reset to defaults" resets them too. Every change is saved to ReShade.ini.
 
 #include "dlss.hpp"
+#include "fg.hpp"
+#include "gpu_profiler.hpp"
 #include "xess.hpp"
 #include "state.hpp"
+#include "recorder.hpp"
+#include "exposure.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -37,33 +43,34 @@ namespace edaa
             ImGui::Separator();
             const uint32_t render_w = s.render_w, display_w = s.back_buffer_w;
             const float scale = display_w != 0 ? static_cast<float>(render_w) / static_cast<float>(display_w) : 0.0f;
-            ImGui::Text("Rendering resolution: %u x %u (%.2f x the display)", render_w, s.render_h, scale);
-            ImGui::Text("Display resolution:   %u x %u", display_w, s.back_buffer_h);
+            ImGui::Text("Resolution: %u x %u -> %u x %u (%.2f x)", render_w, s.render_h, display_w, s.back_buffer_h, scale);
 
             if (render_w == 0 || render_w >= display_w) {
-                ImGui::TextUnformatted("Native resolution: anti-aliasing only. Set the in-game supersampling");
-                ImGui::TextUnformatted("below 1.0 (or an FSR mode) to upscale with the same method.");
+                ImGui::TextDisabled("Anti-aliasing only. In-game supersampling below 1.0 upscales with the same method.");
                 return;
             }
 
             const auto used = static_cast<upscaler>(s.upscaler_used);
 
             if (s.config.game_upscale) {
-                ImGui::TextUnformatted("Upscaling: the game's (bilinear or FSR), after the anti-aliasing (Advanced).");
+                ImGui::TextUnformatted("Upscaling: by the game, after the anti-aliasing (Advanced settings).");
                 return;
             }
 
             const bool use_xess = used == upscaler::xess;
-            edit(ImGui::Checkbox("HUD mask (cockpit HUD from the current frame: no trails)", &s.config.upscale_hud_mask));
-            edit(ImGui::Checkbox("Texture mip bias (display resolution texture detail)", &s.config.upscale_mip_bias));
-            ImGui::Text("Upscaling (%s): %s", use_xess ? "XeSS" : used == upscaler::taa ? "EDAA TAA"
-                                                                                        : "DLSS",
+            ImGui::Text("Upscaling (%s): %s", use_xess ? "XeSS" : used == upscaler::taa ? "EDAA TAA" : "DLSS",
                 s.upscale_status);
-            ImGui::Text("Jitter: %d phases, texture LOD bias %+.2f", s.jitter_phases, s.mip_bias_value.load());
+            edit(ImGui::Checkbox("Cockpit HUD without trails", &s.config.upscale_hud_mask));
 
             if (used == upscaler::taa) {
                 edit(ImGui::SliderFloat("Sharpness", &s.config.upscale_sharpness, 0.0f, 1.0f, "%.2f"));
-                ImGui::TextUnformatted("Any scale works; the TAA settings (Advanced) apply.");
+            }
+
+#if EDAA_DEVELOPER
+            edit(ImGui::Checkbox("Texture mip bias (display resolution texture detail)", &s.config.upscale_mip_bias));
+            ImGui::Text("Jitter: %d phases, texture LOD bias %+.2f", s.jitter_phases, s.mip_bias_value.load());
+
+            if (used == upscaler::taa) {
                 return;
             }
 
@@ -98,6 +105,7 @@ namespace edaa
             }
 
             ImGui::TextUnformatted("Scale: the in-game supersampling closest to the mode's optimal size.");
+#endif
         }
 
 
@@ -117,7 +125,9 @@ namespace edaa
             };
             const choice choices[] = {
                 { aa_method::taa, "EDAA TAA", 1 },
+#if !EDAA_VENDOR_AMD
                 { aa_method::dlaa, "NVIDIA DLSS", dlss::availability() },
+#endif
                 { aa_method::xess, "Intel XeSS", xess::availability() },
             };
             // A saved method that cannot run is replaced by the TAA (passes.cpp).
@@ -184,9 +194,90 @@ namespace edaa
 
                     ImGui::EndCombo();
                 }
+
+                // Exposure DLAA works with (recreates the feature when it changes).
+                edit(ImGui::Combo("Exposure", &s.config.dlss_exposure_mode, "Estimated by DLSS\0Fixed\0From Elite (experimental)\0"));
+
+                if (s.config.dlss_exposure_mode == 1 || s.config.dlss_exposure_mode == 2) {
+                    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+                    edit(ImGui::SliderFloat(s.config.dlss_exposure_mode == 1 ? "Exposure value" : "Exposure value when not found", &s.config.dlss_exposure, 0.1f,
+                        1000.0f, "%.1f", ImGuiSliderFlags_Logarithmic));
+                }
+
+#if EDAA_DEVELOPER
+                if (s.config.dlss_exposure_mode == 2) {
+                    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+                    edit(ImGui::SliderFloat("Elite exposure scale", &s.config.dlss_exposure_scale, 0.1f, 10.0f, "%.2f", ImGuiSliderFlags_Logarithmic));
+                    ImGui::SameLine();
+                    ImGui::Text("now %.2f", exposure::last_value());
+                }
+#endif
+
+                // Sharpening of the DLAA output (ps_sharpen_hdr), off at 0.
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+                edit(ImGui::SliderFloat("Sharpening (0 = off)##dlss", &s.config.dlss_sharpness, 0.0f, 1.0f, "%.2f"));
+
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Gives DLAA's edges and fine detail back some contrast.\n0.3 is a good start; too much makes edges harsh and dark areas grainy.\nHUD and holograms are not sharpened.");
+                }
+
+                // Reactive mask: the current frame where transparents were drawn.
+                edit(ImGui::Checkbox("Reactive mask (particles, glass, glows: no trails)", &s.config.dlss_reactive_mask));
+
+#if EDAA_DEVELOPER
+                if (s.config.dlss_reactive_mask) {
+                    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+                    edit(ImGui::SliderFloat("Reactive mask strength", &s.config.dlss_reactive_strength, 0.0f, 2.0f, "%.2f"));
+                    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+                    edit(ImGui::SliderFloat("Reactive mask threshold (ignore haze)", &s.config.dlss_reactive_threshold, 0.0f, 0.95f, "%.2f"));
+                    bool show = s.config.debug == static_cast<int>(debug_view::reactive);
+
+                    // Debug view, not saved (the debug view always starts off).
+                    if (ImGui::Checkbox("Show reactive mask (yellow)", &show)) {
+                        s.config.debug = show ? static_cast<int>(debug_view::reactive) : static_cast<int>(debug_view::off);
+                    }
+                }
+#endif
             }
             else if (s.config.aa_method == static_cast<int>(aa_method::xess) && (EDAA_DEVELOPER || xess::availability() == 1)) {
                 ImGui::Text("XeSS: %s", xess::status().c_str());
+            }
+
+            // Own ship: the outer hull and nose carry no stencil bit and got the world's motion.
+            edit(ImGui::Checkbox("Keep own ship steady (sharp hull lines when turning)", &s.config.aa_ship_steady));
+
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Finds the own ship while flying (moves with the camera) and gives its hull the ship's motion.\n"
+                                  "Every method, frame generation included. If something outside smears, turn it off.");
+            }
+
+            if (s.config.aa_ship_steady) {
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+                edit(ImGui::SliderFloat("Own ship up to (m)##aa", &s.config.aa_ship_distance, 0.0f, 150.0f, "%.0f"));
+                ImGui::SameLine();
+                ImGui::TextDisabled("0 = found automatically");
+            }
+
+            // Glint stabiliser (ps_spec_stable) after DLAA / XeSS / FSR at native resolution.
+            if (s.config.aa_method != static_cast<int>(aa_method::taa)) {
+                edit(ImGui::Checkbox("Calm blinking glints (after DLSS / XeSS / FSR)", &s.config.spec_stable));
+
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Glints on metal and edges that blink from frame to frame are blended with the last frame.\n"
+                                      "Only on glints, limited to what is around them. Stars, engines and lights are left alone.\n"
+                                      "Not with upscaling.");
+                }
+
+                if (s.config.spec_stable) {
+                    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+                    edit(ImGui::SliderFloat("Glint calming strength", &s.config.spec_stable_strength, 0.0f, 1.0f, "%.2f"));
+#if EDAA_DEVELOPER
+                    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+                    edit(ImGui::SliderFloat("Glint contrast", &s.config.spec_stable_contrast, 0.0f, 0.3f, "%.3f"));
+                    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+                    edit(ImGui::SliderFloat("Glint clip box (std dev)", &s.config.spec_stable_clip, 0.0f, 4.0f, "%.2f"));
+#endif
+                }
             }
 
             draw_upscaling(s, edit);
@@ -209,9 +300,28 @@ namespace edaa
 
         void draw_advanced(addon_state& s, change_tracker& edit)
         {
+            const bool below = s.render_w != 0 && s.render_w < s.back_buffer_w;
+            edit(ImGui::Checkbox("Resolve before the HUD pass (HUD sharp, not anti-aliased)", &s.config.taa_before_hud));
+
+            if (!s.config.taa_before_hud && !s.last.bloom_shader) {
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "No bloom pass found: resolving before the HUD anyway");
+            }
+
+            edit(ImGui::Checkbox("Find the cockpit HUD by its panel textures (needed with EDHM)", &s.config.hud_learn));
+            edit(ImGui::Checkbox("Cockpit HUD moves with the cockpit (sharp panels when upscaling)", &s.config.hud_motion));
+
+            if (below || s.config.game_upscale) {
+                edit(ImGui::Checkbox("Below 1x, let the game upscale (bilinear or FSR) after the anti-aliasing", &s.config.game_upscale));
+            }
+        }
+
+
+#if EDAA_DEVELOPER
+        // TAA tuning and game fixes: their defaults fit, developer build only.
+        void draw_tuning(addon_state& s, change_tracker& edit)
+        {
             // Only what applies to what runs now: the TAA tuning when EDAA TAA
             // runs (its upscaling uses part of it), DLSS/XeSS have none.
-            const bool below = s.render_w != 0 && s.render_w < s.back_buffer_w;
             const bool neural = (s.config.aa_method == static_cast<int>(aa_method::dlaa) && dlss::availability() == 1) ||
                 (s.config.aa_method == static_cast<int>(aa_method::xess) && xess::availability() == 1);
             const bool taau = s.upscaling_active && s.upscaler_used == static_cast<int>(upscaler::taa);
@@ -238,6 +348,11 @@ namespace edaa
                 }
 
                 edit(ImGui::Checkbox("Soft screen edges (reuse edge history)", &s.config.taa_soft_offscreen));
+                edit(ImGui::Checkbox("Sharper TAA", &s.config.taa_sharp));
+
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Samples close to the pixel centre count more and the result is sharpened a little.\nSlightly sharper, slightly more flicker.");
+                }
                 edit(ImGui::SliderFloat("HDR compression scale (higher = bright edges flicker less)", &s.config.taa_hdr_scale, 0.01f, 1000.0f, "%.2f", ImGuiSliderFlags_Logarithmic));
             }
 
@@ -246,7 +361,6 @@ namespace edaa
             }
 
             ImGui::TextUnformatted("Scene");
-            edit(ImGui::Checkbox("Resolve before the HUD pass (HUD sharp, not anti-aliased)", &s.config.taa_before_hud));
             edit(ImGui::Checkbox("Detect maps also by missing sun shadows", &s.config.map_detect_no_shadows));
             edit(ImGui::Combo("Vehicle mask", &s.config.mask_source, "Game stencil (player's vehicle)\0Distance to camera\0"));
 
@@ -257,14 +371,9 @@ namespace edaa
 
             edit(ImGui::Checkbox("Vehicle motion (cockpit follows head movements)", &s.config.vehicle_motion));
             edit(ImGui::Checkbox("Lighting follows the jitter (stable shadow edges)", &s.config.fix_sun_shadows));
-
-            if (below || s.config.game_upscale) {
-                edit(ImGui::Checkbox("Below 1x, let the game upscale (bilinear or FSR) after the anti-aliasing", &s.config.game_upscale));
-            }
         }
 
 
-#if EDAA_DEVELOPER
         void draw_camera(const addon_state& s)
         {
             ImGui::Text("Scene render size  %u x %u (from the G-buffer depth)", s.render_w, s.render_h);
@@ -398,7 +507,7 @@ namespace edaa
             ImGui::Separator();
             ImGui::TextUnformatted("Debug views (Ctrl+Shift+M)");
             edit(ImGui::Checkbox("Generate motion vectors", &s.config.motion_enabled));
-            ImGui::Combo("Debug view", &s.config.debug, "Off\0Motion vectors\0Vehicle mask\0Depth\0History rejection\0Moving objects\0Temporal change (flicker)\0HUD mask (upscaling)\0");
+            ImGui::Combo("Debug view", &s.config.debug, "Off\0Motion vectors\0Vehicle mask\0Depth\0History rejection\0Moving objects\0Temporal change (flicker)\0HUD mask (upscaling)\0Reactive mask (DLSS)\0Ship auto (green: detected, orange: stencil only)\0");
             edit(ImGui::SliderFloat("Colour saturation (px)", &s.config.debug_motion_pixels, 1.0f, 64.0f, "%.0f"));
 
             ImGui::Separator();
@@ -413,6 +522,25 @@ namespace edaa
 
             if (ImGui::Button("Capture now")) {
                 s.capture_requested = true;
+            }
+
+            ImGui::Separator();
+            ImGui::TextUnformatted("Recording for replay (Ctrl+Shift+R): AA inputs into <capture folder>\\recordings");
+
+            if (ImGui::Button(recorder::active() ? "Stop recording" : "Start recording")) {
+                recorder::toggle();
+            }
+
+            ImGui::SameLine();
+            ImGui::TextUnformatted(recorder::status().c_str());
+            edit(ImGui::Checkbox("Whole frame (else the 1600x900 centre)##rec", &s.config.record_full_frame));
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+            edit(ImGui::SliderInt("Memory limit (MB)##rec", &s.config.record_max_mb, 256, 32768, "%d", ImGuiSliderFlags_Logarithmic));
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+            edit(ImGui::SliderFloat("Start delay (s)##rec", &s.config.record_delay_s, 0.0f, 10.0f, "%.0f"));
+
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Time between Ctrl+Shift+R and the start, to get moving first. Pressing again during the countdown cancels.");
             }
 
             ImGui::Text("Capture: %s %s", s.capture_status, s.last_capture_folder.c_str());
@@ -461,6 +589,161 @@ namespace edaa
     }
 
 
+    namespace
+    {
+        // Frame generation (fg_present.cpp): NVIDIA DLSS-G, on/off, frame limit, status.
+        void draw_frame_generation(addon_state& s, change_tracker& edit)
+        {
+            const fg::status st = fg::get_status();
+
+            if (edit(ImGui::Checkbox("Frame Generation (2x)", &s.config.fg_generate)) && s.config.fg_generate) {
+                s.config.fg_present_test = true; // the D3D12 swap chain it needs
+            }
+
+            edit(ImGui::Checkbox("Keep the cockpit HUD steady (no smearing in generated frames)", &s.config.fg_hud_protect));
+
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+            edit(ImGui::SliderInt("Frame limit (displayed FPS, 0 = off)", &s.config.fg_fps_limit, 0, 360));
+            ImGui::TextDisabled("Use this limit only (no external limiter): set it just below the refresh rate, e.g. 140 at 144 Hz.");
+
+            if (s.config.fg_generate && !st.streamline) {
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), st.error != nullptr ? "Stopped: %s" : "Restart the game to start frame generation.",
+                    st.error != nullptr ? st.error : "");
+                return;
+            }
+
+            if (!st.d3d12_path) {
+                ImGui::TextDisabled("Status: off");
+                return;
+            }
+
+            if (!s.config.fg_generate) {
+                ImGui::Text("Status: off (%.0f FPS)", st.real_fps);
+
+#if EDAA_DEVELOPER
+                // Players: the app's quick choice does this when the frame generation is off.
+                if (s.config.fg_present_test) {
+                    if (ImGui::Button("Present through D3D11 again at the next game start")) {
+                        s.config.fg_present_test = false;
+                        edit(true);
+                    }
+                }
+#endif
+                return;
+            }
+
+            if (st.generating) {
+                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "Status: running, %.0f real -> %.0f FPS displayed", st.real_fps, st.shown_fps);
+            }
+            else if (st.background) {
+                ImGui::Text("Status: paused (game in the background), %.0f FPS", st.real_fps);
+            }
+            else if (st.waiting) {
+                ImGui::Text("Status: paused (menu, map or loading), %.0f FPS", st.real_fps);
+            }
+            else {
+                ImGui::Text("Status: starting, %.0f FPS", st.real_fps);
+            }
+
+            ImGui::Text("Reflex low latency: %s", st.reflex ? "on" : "off");
+
+#if EDAA_DEVELOPER
+            if (s.config.fg_hud_protect && st.generating) {
+                ImGui::Text("HUD protection: %s", st.hud_protected ? "active" : "no HUD found this frame");
+            }
+
+            if (st.dlssg_status != 0) {
+                ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "DLSS-G reports problem flags 0x%X (see ReShade.log)", st.dlssg_status);
+            }
+#endif
+        }
+    }
+
+
+#if EDAA_DEVELOPER
+    namespace
+    {
+        // GPU time of EDAA's passes on the game's D3D11 queue (gpu_profiler.cpp).
+        void draw_gpu_timings(addon_state& s, change_tracker& edit)
+        {
+            edit(ImGui::Checkbox("Measure (small cost; log line every 10 s)", &s.config.gpu_profiler));
+
+            if (!s.config.gpu_profiler) {
+                return;
+            }
+
+            const gpu_profiler::results r = gpu_profiler::last();
+            ImGui::Text("Test scene: %c (Ctrl+Shift+N: next)", gpu_profiler::scene());
+
+            if (!r.valid) {
+                ImGui::TextUnformatted("Waiting for results...");
+                return;
+            }
+
+            ImGui::Text("Frame (GPU timeline, idle included): %.2f ms, P99 %.2f ms, %u frames in 2 s", r.frame_mean, r.frame_p99, r.frames);
+
+            if (ImGui::BeginTable("gpu_timings", 3, ImGuiTableFlags_SizingFixedFit)) {
+                ImGui::TableSetupColumn("Pass");
+                ImGui::TableSetupColumn("Mean ms");
+                ImGui::TableSetupColumn("P99 ms");
+                ImGui::TableHeadersRow();
+
+                for (int i = 0; i < gpu_profiler::count; ++i) {
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    ImGui::TextUnformatted(gpu_profiler::section_name(static_cast<gpu_profiler::section>(i)));
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%.2f", r.mean[i]);
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%.2f", r.p99[i]);
+                }
+
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted("EDAA total");
+                ImGui::TableNextColumn();
+                ImGui::Text("%.2f", r.edaa_mean);
+                ImGui::TableNextColumn();
+                ImGui::Text("%.2f", r.edaa_p99);
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted("Elite + rest");
+                ImGui::TableNextColumn();
+                ImGui::Text("%.2f", r.elite_mean);
+                ImGui::EndTable();
+            }
+
+            ImGui::Text("Frames dropped (results not ready): %u", r.skipped);
+            ImGui::TextDisabled("Not measured: DLSS-G generation (D3D12 queue). GITC Uplift NR (before upscaling) shows up in dlss.");
+        }
+    }
+#endif
+
+
+    void draw_recorder_osd(reshade::api::effect_runtime*)
+    {
+#if EDAA_DEVELOPER
+        bool alert = false;
+        const std::string line = recorder::osd(alert);
+
+        if (line.empty()) {
+            return;
+        }
+
+        ImGui::SetNextWindowPos(ImVec2(24, 24), ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(0.7f);
+        const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+            ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove;
+
+        if (ImGui::Begin("##edaa_recorder_osd", nullptr, flags)) {
+            ImGui::TextColored(alert ? ImVec4(1.0f, 0.25f, 0.2f, 1.0f) : ImVec4(0.9f, 0.9f, 0.9f, 1.0f), "%s", line.c_str());
+        }
+
+        ImGui::End();
+#endif
+    }
+
+
     void draw_overlay(reshade::api::effect_runtime*)
     {
         addon_state& s = state();
@@ -472,11 +755,23 @@ namespace edaa
         change_tracker edit;
         draw_main(s, edit);
 
+        if (ImGui::CollapsingHeader("Frame Generation", ImGuiTreeNodeFlags_DefaultOpen)) {
+            draw_frame_generation(s, edit);
+        }
+
         if (ImGui::CollapsingHeader("Advanced settings")) {
             draw_advanced(s, edit);
         }
 
 #if EDAA_DEVELOPER
+        if (ImGui::CollapsingHeader("TAA tuning and game fixes")) {
+            draw_tuning(s, edit);
+        }
+
+        if (ImGui::CollapsingHeader("GPU timings")) {
+            draw_gpu_timings(s, edit);
+        }
+
         if (ImGui::CollapsingHeader("Developer", ImGuiTreeNodeFlags_DefaultOpen)) {
             draw_developer(s, edit);
         }

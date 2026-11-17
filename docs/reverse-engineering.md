@@ -226,6 +226,15 @@ shader draw): the HUD is composited after the TAA, not jittered, not
 accumulated. Note that D3D11 render target binds always report 8 slots
 (empty ones included); count the non-empty ones.
 
+**HUD panels (trace 10.11., with EDHM):** the cockpit HUD is rendered into
+offscreen panel textures first (`R8G8B8A8` colour with a `R24G8`/D24S8 depth
+buffer, sizes like 2048x440, 1466x1200, 682x1022), then blended into the HDR
+scene before the bloom by one pixel shader that reads the panel in `t2`. In
+this setup that shader is `2babfda9d1708376`, not `b4523c39a461fd35`
+(presumably replaced by EDHM), so the add-on can learn it from the panel
+textures (`hud_learn`). The panels write no depth: camera motion vectors give
+them the motion of what is behind them (`hud_motion` gives them the vehicle's).
+
 **Resolution handling**: everything up to SMAA runs at
 `display x SSAAMultiplier` (`cb1 c189`); a single fullscreen draw downsamples
 to the backbuffer before the HUD. Bloom/glare work at fixed fractions of the
@@ -473,3 +482,45 @@ frames. The add-on uses this to pause jitter and TAA from the first tile
 on (`camera_tracker.cpp`, see addon.md); otherwise the history blends the
 tiles together and the jitter shifts them. Tool: off-centre terms are easy
 to list from a `rd_dump_frame.py` dump (`check_layout.py` prints the views).
+
+
+## 10. Exposure (tonemap), for DLAA
+
+Frame trace 11.11. (EDHM loaded, 3200x1800): the tonemap is a `draw 3`
+into an `R8G8B8A8` render-size target after the bloom; its pixel shader
+reads the HDR scene (`t1`), the bloom (`t2`, half size) and a 16x16 LUT
+(`t0`). Its vertex shader `936d466fbd388547` (not replaced by EDHM) only
+samples the first texel of a 6x1 `R32_TYPELESS` texture and passes it on in
+`TEXCOORD1.z`: the adapted scene luminance `L`. The pixel shader
+(`380822531cf1f3d4`, EDHM's copy in `ShaderFixes`) computes the exposure from
+it and its `cb2` (16 float4):
+
+    bias  = cb2[8].x + (cb2[8].z != 0 ? 1.4 : 0)
+    x     = log2(8 L) - bias - 3
+    w2    = 2 cb2[7].w
+    curve = (w2 / (log10(1 + 2^(x cb2[8].y)) + w2)) ^ cb2[7].w
+    E     = (1.03 cb2[7].z - curve) / L * 2^-cb2[7].y
+
+The scene is multiplied by `cb2[2].x` (clamped), by `E`, mixed with the
+bloom (`cb2[1].w`) and multiplied by `cb2[6].y` before the tonemap curve.
+`dlss_exposure_mode` 2 copies the texture and `cb2` at the tonemap draw (GPU
+copies) and the next frame's resolve evaluates `cb2[2].x * E * cb2[6].y`
+(`ps_exposure`) into the 1x1 exposure texture of DLAA (`exposure.hpp`).
+
+Cross-check (12.11.): RenoDX's Elite module (github.com/clshortfuse/renodx,
+`src/games/elitedangerous/tonemap`, MIT) carries the same pixel shader
+decompiled (`tonemap_0xD7E646E3`, RenoDX's CRC32 hash); its exposure lines
+match the formula above term for term, including the clamp of the scene to
+`64500 cb2[2].x` before it. Two more variants exist there: "no bloom"
+(`0x6BE69EF3`, same `TEXCOORD1.z` luminance, so the same exposure) and "no
+bloom, no LUT" (`0xEBD83636`), which gets no luminance at all and multiplies
+by `cb2[7].x` instead: `cb2[2].x cb2[7].x cb2[6].y`. Mode 2 does not handle
+that variant (its vertex shader is another one); DLAA then keeps the fixed
+value. RenoDX replaces only the pixel shaders, so with it installed the
+vertex shader and `cb2` that mode 2 copies are unchanged.
+
+RenoDX also shows where Elite drops to 8 bit: the tonemap, its own AA
+(MLAA, FXAA, SMAA) and FSR1 write `R8G8B8A8` targets, which RenoDX replaces
+by `R16G16B16A16_FLOAT` clones when those shaders draw. EDAA's DLAA/TAA
+resolve runs before, on the HDR scene; only the upscaling paths that work on
+the tonemapped image see 8 bit.
